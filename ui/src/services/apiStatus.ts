@@ -1,6 +1,6 @@
 import { showToast } from '@prefecthq/prefect-design'
 import { AxiosError, AxiosInstance, isAxiosError } from 'axios'
-import { ref } from 'vue'
+import { h, ref } from 'vue'
 import ApiStatusToast from '@/components/ApiStatusToast.vue'
 
 const ranges = [500]
@@ -17,7 +17,7 @@ export function setupApiStatusInterceptor(axiosInstance: AxiosInstance): void {
   const interceptorId = axiosInstance.interceptors.response.use(undefined, interceptor)
 
   function isInterceptedError(error: AxiosError): boolean {
-    if (!isAxiosError(error) || !error.code) {
+    if (!isAxiosError(error)) {
       return false
     }
 
@@ -27,13 +27,20 @@ export function setupApiStatusInterceptor(axiosInstance: AxiosInstance): void {
       return statuses.includes(status) || ranges.some(range => status >= range && status < range + 100)
     }
 
-    return codes.includes(error.code)
+    if (error.code) {
+      return codes.includes(error.code)
+    }
+
+    return false
   }
 
   function interceptor(error: AxiosError): Promise<AxiosError> {
     if (isInterceptedError(error) && !shown.value) {
       shown.value = true
-      showToast(ApiStatusToast, 'error', { dismissible: true, timeout: false })
+      const status = error.response?.status
+      const kind = status === 401 || status === 403 ? 'auth' : 'other'
+      const toastComponent = h(ApiStatusToast, { kind })
+      showToast(toastComponent, 'error', { dismissible: true, timeout: false })
       ejectInterceptor()
     }
     return Promise.reject(error)
