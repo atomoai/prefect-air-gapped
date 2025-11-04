@@ -16,6 +16,8 @@ jobs:
       github.event_name != 'push' ||
       !startsWith(github.ref, 'refs/tags/') ||
       startsWith(github.ref, 'refs/tags/air-gapped-')
+    outputs:
+      version: ${{ steps.extract_version.outputs.version }}
 
     steps:
       - name: Checkout code
@@ -30,6 +32,18 @@ jobs:
         id: node_version
         run: |
           echo "NODE_VERSION=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+
+      - name: Extract version from tag
+        id: extract_version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/air-gapped-* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/air-gapped-}"
+          else
+            # For workflow_dispatch, use a test version
+            VERSION="test"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Extracted version: ${VERSION}"
 
       - name: Build Docker image
         uses: docker/build-push-action@v6
@@ -68,8 +82,7 @@ jobs:
           echo "🔍 Verifying version matches tag..."
           echo ""
 
-          # Extract version from tag (remove 'air-gapped-' prefix)
-          TAG_VERSION="${GITHUB_REF#refs/tags/air-gapped-}"
+          TAG_VERSION="${{ steps.extract_version.outputs.version }}"
           echo "Expected version from tag: ${TAG_VERSION}"
 
           # Get version from docker image
@@ -86,43 +99,9 @@ jobs:
             exit 1
           fi
 
-
-
-      - name: Log in to Docker Hub
-        if: startsWith(github.ref, 'refs/tags/air-gapped-')
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Publish image to Docker Hub
-        if: startsWith(github.ref, 'refs/tags/air-gapped-')
-        run: |
-          set -euo pipefail
-
-          # Destination repository on Docker Hub, e.g. "myuser/prefect-air-gapped"
-          DEST_REPO="${{ vars.DOCKERHUB_REPO }}"
-          if [ -z "${DEST_REPO}" ]; then
-            echo "Repository variable DOCKERHUB_REPO is not set (e.g. myuser/prefect-air-gapped)."
-            exit 1
-          fi
-
-          # Extract version from tag (remove 'air-gapped-' prefix)
-          TAG_VERSION="${GITHUB_REF#refs/tags/air-gapped-}"
-
-          echo "🔐 Authenticated to Docker Hub"
-          echo "🚀 Publishing image ${DEST_REPO}:${TAG_VERSION}"
-
-          # Reuse the already built and tested image by retagging and pushing
-          docker tag prefect-air-gapped:test "${DEST_REPO}:${TAG_VERSION}"
-          docker push "${DEST_REPO}:${TAG_VERSION}"
-
-          echo "✅ Published ${DEST_REPO}:${TAG_VERSION}"
-
-
       - name: Build summary
         run: |
-          echo "### ✅ Docker Build Validation Passed" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Phase 1: Build Validation Passed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Image:** prefect-air-gapped:test" >> $GITHUB_STEP_SUMMARY
           echo "**Python:** 3.12" >> $GITHUB_STEP_SUMMARY
@@ -130,14 +109,72 @@ jobs:
 
           # Add version info if triggered by tag
           if [[ "$GITHUB_REF" == refs/tags/air-gapped-* ]]; then
-            TAG_VERSION="${GITHUB_REF#refs/tags/air-gapped-}"
+            TAG_VERSION="${{ steps.extract_version.outputs.version }}"
             echo "**Tag Version:** ${TAG_VERSION}" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "✅ Version verification passed" >> $GITHUB_STEP_SUMMARY
-            if [ -n "${{ vars.DOCKERHUB_REPO }}" ]; then
-              echo "**Published To:** docker.io/${{ vars.DOCKERHUB_REPO }}:${TAG_VERSION}" >> $GITHUB_STEP_SUMMARY
-            fi
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "All basic functionality tests passed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "➡️ Proceeding to Phase 2: Multi-variant build and publish" >> $GITHUB_STEP_SUMMARY
+
+  publish-matrix:
+    name: Publish multi-variant images
+    needs: build-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Only publish on tags
+    if: startsWith(github.ref, 'refs/tags/air-gapped-')
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get Node version
+        id: node_version
+        run: |
+          echo "NODE_VERSION=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            PYTHON_VERSION=${{ matrix.python-version }}
+            NODE_VERSION=${{ steps.node_version.outputs.NODE_VERSION }}
+          tags: ${{ vars.DOCKERHUB_REPO }}:${{ needs.build-test.outputs.version }}-python${{ matrix.python-version }}
+          push: true
+          pull: true
+          provenance: false
+          cache-from: type=gha,scope=air-gapped-${{ matrix.python-version }},ignore-error=true
+          cache-to: type=gha,mode=max,scope=air-gapped-${{ matrix.python-version }},ignore-error=true
+
+      - name: Build summary
+        run: |
+          echo "### ✅ Published: ${{ vars.DOCKERHUB_REPO }}:${{ needs.build-test.outputs.version }}-python${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Python:** ${{ matrix.python-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Platform:** linux/amd64" >> $GITHUB_STEP_SUMMARY
