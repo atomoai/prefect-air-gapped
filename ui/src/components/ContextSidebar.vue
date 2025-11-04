@@ -59,7 +59,7 @@
   const canSeeWorkPools = computed(() => can.read.work_pool)
 
   const { showModal: showJoinCommunityModal, open: openJoinCommunityModal } = useShowModal()
-  const { value: joinTheCommunityModalDismissed } = useStorage('local', 'join-the-community-modal-dismissed', false)
+  const { value: joinTheCommunityModalDismissed } = useStorage('local', 'join-the-community-modal-dismissed', true)
   function updateShowModal(updatedShowModal: boolean): void {
     showJoinCommunityModal.value = updatedShowModal
     if (!updatedShowModal) {
