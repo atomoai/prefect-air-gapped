@@ -54,7 +54,7 @@ jobs:
           build-args: |
             PYTHON_VERSION=3.12
             NODE_VERSION=${{ steps.node_version.outputs.NODE_VERSION }}
-          tags: prefect-air-gapped:test
+          tags: prefect-air-gapped:${{ steps.extract_version.outputs.version }}
           push: false
           load: true
           cache-from: type=gha,scope=test-build
@@ -66,15 +66,15 @@ jobs:
           echo ""
 
           echo "✓ Testing prefect version..."
-          docker run --rm prefect-air-gapped:test prefect version
+          docker run --rm prefect-air-gapped:${{ steps.extract_version.outputs.version }} prefect version
 
           echo ""
           echo "✓ Testing prefect --help..."
-          docker run --rm prefect-air-gapped:test prefect --help
+          docker run --rm prefect-air-gapped:${{ steps.extract_version.outputs.version }} prefect --help
 
           echo ""
           echo "✓ Testing Python import..."
-          docker run --rm prefect-air-gapped:test python -c "import prefect; print(f'Prefect {prefect.__version__}')"
+          docker run --rm prefect-air-gapped:${{ steps.extract_version.outputs.version }} python -c "import prefect; print(f'Prefect {prefect.__version__}')"
 
       - name: Verify version matches tag
         if: startsWith(github.ref, 'refs/tags/air-gapped-')
@@ -86,7 +86,7 @@ jobs:
           echo "Expected version from tag: ${TAG_VERSION}"
 
           # Get version from docker image
-          IMAGE_VERSION=$(docker run --rm prefect-air-gapped:test prefect version | grep -oP 'Version:\s+\K[\d.]+')
+          IMAGE_VERSION=$(docker run --rm prefect-air-gapped:${{ steps.extract_version.outputs.version }} prefect version | grep -oP 'Version:\s+\K[\d.]+')
           echo "Image version: ${IMAGE_VERSION}"
 
           # Compare versions
@@ -103,7 +103,7 @@ jobs:
         run: |
           echo "### ✅ Phase 1: Build Validation Passed" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Image:** prefect-air-gapped:test" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** prefect-air-gapped:${{ steps.extract_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "**Python:** 3.12" >> $GITHUB_STEP_SUMMARY
           echo "**Platform:** linux/amd64" >> $GITHUB_STEP_SUMMARY
 
