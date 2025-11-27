@@ -87,6 +87,8 @@ jobs:
 
           # Get version from docker image
           IMAGE_VERSION=$(docker run --rm prefect-air-gapped:${{ steps.extract_version.outputs.version }} prefect version | grep -oP 'Version:\s+\K[\d.]+')
+          # Trim trailing periods and whitespace
+          IMAGE_VERSION=$(echo "${IMAGE_VERSION}" | sed 's/[. ]*$//')
           echo "Image version: ${IMAGE_VERSION}"
 
           # Compare versions
