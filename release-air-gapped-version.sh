@@ -19,6 +19,8 @@ fi
 # Fetch latest tags from upstream
 echo -e "${BLUE}📥 Fetching latest tags from upstream...${NC}"
 git fetch upstream --tags
+echo -e "${BLUE}⏫ Pushing fetched tags to origin...${NC}"
+git push origin --tags
 echo ""
 
 
