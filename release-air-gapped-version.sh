@@ -21,6 +21,8 @@ echo -e "${BLUE}📥 Fetching latest tags from upstream...${NC}"
 git fetch upstream --tags
 echo ""
 
+
+
 # Now check for the argument
 UPSTREAM_TAG="${1}"
 
@@ -37,6 +39,7 @@ if [ -z "$UPSTREAM_TAG" ]; then
     fi
     exit 1
 fi
+
 
 echo -e "${BLUE}🔄 Rebasing air-gapped/patches onto tag ${UPSTREAM_TAG}...${NC}"
 echo ""
@@ -64,6 +67,12 @@ if ! git diff-index --quiet HEAD --; then
 else
     STASHED=false
 fi
+
+# Reset main branch to upstream/main
+echo -e "${BLUE}📥 Resetting main branch to upstream/main...${NC}"
+git checkout main
+git reset upstream/main --hard
+echo ""
 
 # Checkout air-gapped/patches
 echo ""
