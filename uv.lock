@@ -4115,6 +4115,7 @@ dependencies = [
     { name = "pathspec" },
     { name = "pendulum", marker = "python_full_version < '3.13'" },
     { name = "pluggy" },
+    { name = "prefect-azure" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-core" },
@@ -4326,6 +4327,7 @@ requires-dist = [
     { name = "pendulum", marker = "python_full_version < '3.13'", specifier = ">=3.1.0,<4" },
     { name = "pluggy", specifier = ">=1.6.0" },
     { name = "prefect-aws", marker = "extra == 'aws'", specifier = ">=0.5.8" },
+    { name = "prefect-azure", specifier = "==0.4.11" },
     { name = "prefect-azure", marker = "extra == 'azure'", specifier = ">=0.4.0" },
     { name = "prefect-bitbucket", marker = "extra == 'bitbucket'", specifier = ">=0.3.0" },
     { name = "prefect-dask", marker = "extra == 'dask'", specifier = ">=0.3.0" },
@@ -4477,7 +4479,7 @@ wheels = [
 
 [[package]]
 name = "prefect-azure"
-version = "0.4.8"
+version = "0.4.11"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -4488,9 +4490,9 @@ dependencies = [
     { name = "prefect-docker" },
     { name = "setuptools" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b6/dd/ef19c86342e3843184d78b1257189a0ec2a3d628af582fa6906f5a0e69bd/prefect_azure-0.4.8.tar.gz", hash = "sha256:235239e3526aac1c3704e34467bb2f0c969f147c06b7297e04eb59eebbbf4952", size = 57940, upload-time = "2026-01-15T22:53:41.935Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/84/76/b62d9bc9c9d49674e00a819a4a8b7374729d5ce5bd4266f3c45c833ca226/prefect_azure-0.4.11.tar.gz", hash = "sha256:f510f89978f7c78411d39c0b6a075fa470e38424d0843b6d87035ee590f6fbe7", size = 63813, upload-time = "2026-06-05T19:38:08.341Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ff/5e/555d30bbc30b9410d54c9908163e7463b724280b633132f430f8dc28b60b/prefect_azure-0.4.8-py3-none-any.whl", hash = "sha256:ea0c94ce837c0056422c2f1d97be36fb94a4ecd9408671afe6dd7f9f893cf426", size = 41702, upload-time = "2026-01-15T22:53:40.532Z" },
+    { url = "https://files.pythonhosted.org/packages/10/2e/a1430cde42d520e591af538c55fe521577ce765b17168bc61b169e1d948c/prefect_azure-0.4.11-py3-none-any.whl", hash = "sha256:a97e79bb741a00e5ddb99a79db0879773a7e524b827554d6ef6ea0e96b678881", size = 45073, upload-time = "2026-06-05T19:38:07Z" },
 ]
 
 [[package]]
@@ -6388,11 +6390,11 @@ wheels = [
 
 [[package]]
 name = "setuptools"
-version = "82.0.1"
+version = "80.10.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/4f/db/cfac1baf10650ab4d1c111714410d2fbb77ac5a616db26775db562c8fab2/setuptools-82.0.1.tar.gz", hash = "sha256:7d872682c5d01cfde07da7bccc7b65469d3dca203318515ada1de5eda35efbf9", size = 1152316, upload-time = "2026-03-09T12:47:17.221Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/95/faf61eb8363f26aa7e1d762267a8d602a1b26d4f3a1e758e92cb3cb8b054/setuptools-80.10.2.tar.gz", hash = "sha256:8b0e9d10c784bf7d262c4e5ec5d4ec94127ce206e8738f29a437945fbc219b70", size = 1200343, upload-time = "2026-01-25T22:38:17.252Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/76/f789f7a86709c6b087c5a2f52f911838cad707cc613162401badc665acfe/setuptools-82.0.1-py3-none-any.whl", hash = "sha256:a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb", size = 1006223, upload-time = "2026-03-09T12:47:15.026Z" },
+    { url = "https://files.pythonhosted.org/packages/94/b8/f1f62a5e3c0ad2ff1d189590bfa4c46b4f3b6e49cef6f26c6ee4e575394d/setuptools-80.10.2-py3-none-any.whl", hash = "sha256:95b30ddfb717250edb492926c92b5221f7ef3fbcc2b07579bcd4a27da21d0173", size = 1064234, upload-time = "2026-01-25T22:38:15.216Z" },
 ]
 
 [[package]]
