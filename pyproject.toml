@@ -85,6 +85,7 @@ dependencies = [
     "pydocket>=0.19.0",
     "azure-monitor-opentelemetry>=1.8.6",
     "prefect-azure==0.4.11",
+    "importlib-metadata>=8.7.1",
 ]
 [project.urls]
 Changelog = "https://github.com/PrefectHQ/prefect/releases"
