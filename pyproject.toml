@@ -85,7 +85,7 @@ dependencies = [
     "pluggy>=1.6.0",
     "pydocket>=0.19.0",
     "azure-monitor-opentelemetry>=1.8.6",
-    "prefect-azure==0.4.11",
+    "prefect-azure>=0.4.11,<0.5.0",
     "importlib-metadata>=8.7.1",
 ]
 [project.urls]
