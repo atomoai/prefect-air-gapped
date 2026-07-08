@@ -4329,7 +4329,7 @@ requires-dist = [
     { name = "pendulum", marker = "python_full_version < '3.13'", specifier = ">=3.1.0,<4" },
     { name = "pluggy", specifier = ">=1.6.0" },
     { name = "prefect-aws", marker = "extra == 'aws'", specifier = ">=0.5.8" },
-    { name = "prefect-azure", specifier = "==0.4.11" },
+    { name = "prefect-azure", specifier = ">=0.4.11,<0.5.0" },
     { name = "prefect-azure", marker = "extra == 'azure'", specifier = ">=0.4.0" },
     { name = "prefect-bitbucket", marker = "extra == 'bitbucket'", specifier = ">=0.3.0" },
     { name = "prefect-dask", marker = "extra == 'dask'", specifier = ">=0.3.0" },
