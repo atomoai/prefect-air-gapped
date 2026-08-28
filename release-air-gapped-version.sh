@@ -16,6 +16,13 @@ if ! git remote get-url upstream >/dev/null 2>&1; then
     echo ""
 fi
 
+# The rebase regenerates uv.lock instead of merging it (see .gitattributes), so
+# uv has to be available before we start moving branches around.
+if ! command -v uv >/dev/null 2>&1; then
+    echo -e "${RED}❌ uv not found on PATH — required to regenerate uv.lock during the rebase${NC}"
+    exit 1
+fi
+
 # Fetch latest tags from upstream
 echo -e "${BLUE}📥 Fetching latest tags from upstream...${NC}"
 git fetch upstream --tags
@@ -91,12 +98,60 @@ echo -e "${BLUE}Current base: ${OLD_BASE_SHORT}${NC}"
 COMMIT_COUNT=$(git rev-list --count ${OLD_BASE}..air-gapped/patches)
 echo -e "${BLUE}Commits to rebase: ${COMMIT_COUNT}${NC}"
 
-# Perform the rebase using --onto to transplant patches directly onto the tag
+rebase_in_progress() {
+    [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]
+}
+
+# Perform the rebase using --onto to transplant patches directly onto the tag.
+#
+# uv.lock conflicts here are expected and are never real conflicts: our patches
+# pin extra dependencies, upstream moves their shared transitive versions every
+# release, and the lockfile is generated output. The only correct resolution is
+# to discard the patched lock and re-resolve, so do that automatically and keep
+# going. Anything else that conflicts still stops the release for a human.
+REBASE_OK=false
 echo ""
 echo -e "${YELLOW}🔀 Rebasing ${COMMIT_COUNT} commits onto ${UPSTREAM_TAG} (using --onto)...${NC}"
 if git rebase --onto "refs/tags/${UPSTREAM_TAG}" "${OLD_BASE}" air-gapped/patches; then
+    REBASE_OK=true
+else
+    while rebase_in_progress; do
+        CONFLICTED=$(git diff --name-only --diff-filter=U)
+        if [ "${CONFLICTED}" != "uv.lock" ]; then
+            break
+        fi
+        echo ""
+        echo -e "${BLUE}🔁 uv.lock conflict — discarding the patched lock and re-resolving...${NC}"
+        git checkout --ours -- uv.lock
+        if ! uv lock; then
+            echo -e "${RED}❌ uv lock failed — the pinned dependencies do not resolve against ${UPSTREAM_TAG}${NC}"
+            echo -e "${YELLOW}   Loosen the constraints in pyproject.toml, then:${NC}"
+            echo "     uv lock && git add pyproject.toml uv.lock && git rebase --continue"
+            break
+        fi
+        git add uv.lock
+        if GIT_EDITOR=true git rebase --continue; then
+            REBASE_OK=true
+            break
+        fi
+    done
+fi
+
+if [ "${REBASE_OK}" = true ]; then
     echo ""
     echo -e "${GREEN}✅ Rebase completed successfully!${NC}"
+
+    # The lock was regenerated mid-rebase, and a cleanly-applied lock patch can
+    # still leave it describing a resolution that no longer exists. Verify before
+    # anything is published.
+    echo ""
+    echo -e "${BLUE}🔎 Validating uv.lock against pyproject.toml...${NC}"
+    if ! uv lock --check; then
+        echo -e "${RED}❌ uv.lock is out of sync with pyproject.toml${NC}"
+        echo -e "${YELLOW}   Run 'uv lock', commit the result, then re-run this script.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ uv.lock is consistent${NC}"
 
     # Push the rebased patches branch
     echo ""
@@ -141,6 +196,7 @@ else
     echo -e "${RED}⚠️  Conflicts detected during rebase!${NC}"
     echo ""
     echo -e "${YELLOW}To resolve conflicts:${NC}"
+    echo "  0. Never hand-merge uv.lock: git checkout --ours -- uv.lock && uv lock"
     echo "  1. Fix conflicts in the listed files"
     echo "  2. git add <resolved-files>"
     echo "  3. git rebase --continue"
