@@ -1,10 +1,23 @@
+import { QueryClient } from "@tanstack/react-query";
+import { createMemoryHistory } from "@tanstack/react-router";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { App } from "../src/app";
-import { router } from "../src/router";
+import { createAppRouter } from "../src/router";
 
 describe("Navigation tests", () => {
+	let router: ReturnType<typeof createAppRouter>;
+	let queryClient: QueryClient;
+
+	beforeEach(() => {
+		queryClient = new QueryClient();
+		router = createAppRouter({
+			queryClient,
+			history: createMemoryHistory({ initialEntries: ["/"] }),
+		});
+	});
+
 	it.each([
 		["/dashboard", "Dashboard"],
 		["/runs", "Runs"],
@@ -18,8 +31,11 @@ describe("Navigation tests", () => {
 		["/settings", "Settings"],
 	])("can navigate to %s", async (path, text) => {
 		const user = userEvent.setup();
-		await waitFor(() => render(<App />));
-		await user.click(screen.getByRole("link", { name: text }));
-		expect(router.state.location.pathname).toBe(path);
+		render(<App appRouter={router} appQueryClient={queryClient} />);
+		await user.click(await screen.findByRole("link", { name: text }));
+		await waitFor(() => {
+			expect(router.state.location.pathname).toBe(path);
+			expect(router.state.status).toBe("idle");
+		});
 	});
 });

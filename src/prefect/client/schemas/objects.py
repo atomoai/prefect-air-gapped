@@ -36,6 +36,7 @@ from typing_extensions import Literal, Self, TypeVar
 
 from prefect._internal.compatibility.async_dispatch import async_dispatch
 from prefect._internal.compatibility.migration import getattr_migration
+from prefect._internal.result_records import ResultRecordMetadata
 from prefect._internal.schemas.bases import (
     ObjectBaseModel,
     PrefectBaseModel,
@@ -53,7 +54,6 @@ from prefect._internal.schemas.validators import (
     validate_parent_and_ref_diff,
 )
 from prefect._internal.uuid7 import uuid7
-from prefect._result_records import ResultRecordMetadata
 from prefect.client.schemas.schedules import SCHEDULE_TYPES
 from prefect.settings import PREFECT_CLOUD_API_URL, PREFECT_CLOUD_UI_URL
 from prefect.types import (
@@ -132,6 +132,7 @@ class DeploymentStatus(AutoEnum):
 
     READY = AutoEnum.auto()
     NOT_READY = AutoEnum.auto()
+    DISABLED = AutoEnum.auto()  # Prefect Cloud only
 
 
 class WorkQueueStatus(AutoEnum):
@@ -155,6 +156,12 @@ class ConcurrencyOptions(PrefectBaseModel):
     """
 
     collision_strategy: ConcurrencyLimitStrategy
+    grace_period_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Grace period in seconds for infrastructure to start before concurrency slots are revoked. If not set, falls back to server setting.",
+    )
 
 
 class ConcurrencyLimitConfig(PrefectBaseModel):
@@ -164,6 +171,12 @@ class ConcurrencyLimitConfig(PrefectBaseModel):
 
     limit: int
     collision_strategy: ConcurrencyLimitStrategy = ConcurrencyLimitStrategy.ENQUEUE
+    grace_period_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Grace period in seconds for infrastructure to start before concurrency slots are revoked",
+    )
 
 
 class ConcurrencyLeaseHolder(PrefectBaseModel):
@@ -207,6 +220,12 @@ class StateDetails(PrefectBaseModel):
             return TaskRunResult(id=self.task_run_id)
         else:
             return None
+
+
+# Force model rebuild to prevent MockValSer errors when serializing with
+# serialize_as_any=True. PrefectBaseModel has defer_build=True, which can leave
+# nested models incomplete. See: https://github.com/PrefectHQ/prefect/issues/18053
+StateDetails.model_rebuild()
 
 
 def data_discriminator(x: Any) -> str:
@@ -923,6 +942,18 @@ class TaskRun(TimeSeriesBaseModel, ObjectBaseModel):
         return get_or_create_run_name(name)
 
 
+# These models are instantiated while task runs are being created locally on the
+# concurrent submission path. Rebuild them eagerly so threadpool workers do not
+# trigger deferred first-use schema builds under contention.
+RunInput.model_rebuild()
+TaskRunPolicy.model_rebuild()
+TaskRunResult.model_rebuild()
+FlowRunResult.model_rebuild()
+Parameter.model_rebuild()
+Constant.model_rebuild()
+TaskRun.model_rebuild()
+
+
 class Workspace(PrefectBaseModel):
     """
     A Prefect Cloud workspace.
@@ -1414,6 +1445,13 @@ class WorkQueue(ObjectBaseModel):
     status: Optional[WorkQueueStatus] = Field(
         default=None, description="The queue status."
     )
+    active_slots: Optional[int] = Field(
+        default=None,
+        description=(
+            "The number of concurrency slots currently in use. "
+            "None when concurrency_limit is not set."
+        ),
+    )
 
 
 class WorkQueueHealthPolicy(PrefectBaseModel):
@@ -1439,7 +1477,7 @@ class WorkQueueHealthPolicy(PrefectBaseModel):
         Given empirical information about the state of the work queue, evaluate its health status.
 
         Args:
-            late_runs: the count of late runs for the work queue.
+            late_runs_count: the count of late runs for the work queue.
             last_polled: the last time the work queue was polled, if available.
 
         Returns:
@@ -1512,6 +1550,24 @@ class WorkPoolStorageConfiguration(PrefectBaseModel):
     )
 
 
+class ServerDefaultResultStorage(PrefectBaseModel):
+    """Server-side default result storage configuration."""
+
+    default_result_storage_block_id: Optional[UUID] = Field(
+        default=None,
+        description="The block document ID of the server default result storage block.",
+    )
+
+
+class ServerDefaultResultStorageUpdate(PrefectBaseModel):
+    """Request payload for setting the server default result storage block."""
+
+    default_result_storage_block_id: UUID = Field(
+        default=...,
+        description="The block document ID of the server default result storage block.",
+    )
+
+
 class WorkPool(ObjectBaseModel):
     """An ORM representation of a work pool"""
 
@@ -1534,6 +1590,13 @@ class WorkPool(ObjectBaseModel):
     )
     status: Optional[WorkPoolStatus] = Field(
         default=None, description="The current status of the work pool."
+    )
+    active_slots: Optional[int] = Field(
+        default=None,
+        description=(
+            "The number of concurrency slots occupied by pending or running "
+            "flow runs. None when concurrency_limit is not set."
+        ),
     )
 
     storage_configuration: WorkPoolStorageConfiguration = Field(

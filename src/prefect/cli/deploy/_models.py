@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -7,7 +8,28 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from prefect._experimental.sla.objects import SlaTypes
 from prefect.client.schemas.actions import DeploymentScheduleCreate
 from prefect.client.schemas.schedules import SCHEDULE_TYPES
-from prefect.events import DeploymentTriggerTypes
+
+_ACTION_FIELDS = ("build", "push", "pull")
+
+
+def _wrap_single_action_mappings(data: Any) -> Any:
+    """Normalize action sections that are given as a single step mapping.
+
+    A non-empty mapping like
+    `{"prefect.deployments.steps.run_shell_script": {"script": "echo hi"}}`
+    is wrapped into a one-item action list. Lists, `None`, and empty mappings
+    are left unchanged.
+    """
+    if not isinstance(data, dict):
+        return data
+    updates = {
+        field: [value]
+        for field in _ACTION_FIELDS
+        if isinstance((value := data.get(field)), dict) and value
+    }
+    if updates:
+        data = {**data, **updates}
+    return data
 
 
 class WorkPoolConfig(BaseModel):
@@ -48,11 +70,18 @@ class DeploymentConfig(BaseModel):
     push: Optional[Union[List[Dict[str, Any]], Dict[str, Any]]] = None
     pull: Optional[Union[List[Dict[str, Any]], Dict[str, Any]]] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_action_mappings(cls, data: Any) -> Any:
+        return _wrap_single_action_mappings(data)
+
     # infra-specific
     work_pool: Optional[WorkPoolConfig] = None
 
     # automations metadata
-    triggers: Optional[List[DeploymentTriggerTypes]] = None
+    # Triggers are stored as raw dicts to allow Jinja templating (e.g., enabled: "{{ prefect.variables.is_prod }}")
+    # Strict validation happens later in _initialize_deployment_triggers after template resolution
+    triggers: Optional[List[Dict[str, Any]]] = None
     sla: Optional[List[SlaTypes]] = None
 
 
@@ -70,6 +99,11 @@ class PrefectYamlModel(BaseModel):
 
     # deployments
     deployments: List[DeploymentConfig] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_action_mappings(cls, data: Any) -> Any:
+        return _wrap_single_action_mappings(data)
 
     @staticmethod
     def _validate_action_steps(steps: Optional[List[Dict[str, Any]]]) -> None:
@@ -99,6 +133,7 @@ class ConcurrencyLimitSpec(BaseModel):
 
     limit: Optional[int] = None
     collision_strategy: Optional[str] = None
+    grace_period_seconds: Optional[int] = None
 
 
 class RawScheduleConfig(BaseModel):
@@ -111,7 +146,9 @@ class RawScheduleConfig(BaseModel):
 
     # One-of schedule selectors
     cron: Optional[str] = None
-    interval: Optional[int] = None
+    interval: Optional[timedelta] = (
+        None  # accepts int/float (seconds), ISO 8601, HH:MM:SS
+    )
     rrule: Optional[str] = None
 
     # Common extras
@@ -120,6 +157,7 @@ class RawScheduleConfig(BaseModel):
     active: Optional[Union[bool, str]] = None  # Allow string for template values
     parameters: Dict[str, Any] = Field(default_factory=dict)
     slug: Optional[str] = None
+    replaces: Optional[str] = None  # The slug of an existing schedule to replace
 
     # Cron-specific
     day_or: Optional[Union[bool, str]] = None  # Allow string for template values

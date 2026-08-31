@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import logging
 import sqlite3
 import ssl
 import traceback
@@ -16,6 +16,7 @@ import sqlalchemy as sa
 from sqlalchemy import AdaptedConnection, event
 from sqlalchemy.dialects.sqlite import aiosqlite
 from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
     AsyncEngine,
@@ -26,6 +27,13 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import ConnectionPoolEntry
 from typing_extensions import TypeAlias
 
+from prefect._internal.observability import configure_logfire
+from prefect._internal.plugins.manager import (
+    build_manager,
+    call_async_hook,
+    load_entry_point_plugins,
+)
+from prefect.plugins import HookSpec
 from prefect.settings import (
     PREFECT_API_DATABASE_CONNECTION_TIMEOUT,
     PREFECT_API_DATABASE_ECHO,
@@ -35,18 +43,7 @@ from prefect.settings import (
 )
 from prefect.utilities.asyncutils import add_event_loop_shutdown_callback
 
-if os.getenv("PREFECT_LOGFIRE_ENABLED"):
-    import logfire  # pyright: ignore
-
-    token: str | None = os.getenv("PREFECT_LOGFIRE_WRITE_TOKEN")
-    if token is None:
-        raise ValueError(
-            "PREFECT_LOGFIRE_WRITE_TOKEN must be set when PREFECT_LOGFIRE_ENABLED is true"
-        )
-
-    logfire.configure(token=token)  # pyright: ignore
-else:
-    logfire = None
+logfire: Any | None = configure_logfire()
 
 SQLITE_BEGIN_MODE: ContextVar[Optional[str]] = ContextVar(  # novm
     "SQLITE_BEGIN_MODE", default=None
@@ -140,6 +137,7 @@ class BaseDatabaseConfiguration(ABC):
         connection_app_name: Optional[str] = None,
         statement_cache_size: Optional[int] = None,
         prepared_statement_cache_size: Optional[int] = None,
+        search_path: Optional[str] = None,
     ) -> None:
         self.connection_url = connection_url
         self.echo: bool = echo or PREFECT_API_DATABASE_ECHO.value()
@@ -159,13 +157,23 @@ class BaseDatabaseConfiguration(ABC):
             connection_app_name
             or get_current_settings().server.database.sqlalchemy.connect_args.application_name
         )
+        # `is None`, not `or`: 0 is a meaningful value for both of these. Setting
+        # statement_cache_size to 0 is required behind PgBouncer in transaction mode,
+        # and 0 disables the prepared statement cache, so `or` would discard exactly
+        # the value the settings describe as the reason to set them.
         self.statement_cache_size: Optional[int] = (
             statement_cache_size
-            or get_current_settings().server.database.sqlalchemy.connect_args.statement_cache_size
+            if statement_cache_size is not None
+            else get_current_settings().server.database.sqlalchemy.connect_args.statement_cache_size
         )
         self.prepared_statement_cache_size: Optional[int] = (
             prepared_statement_cache_size
-            or get_current_settings().server.database.sqlalchemy.connect_args.prepared_statement_cache_size
+            if prepared_statement_cache_size is not None
+            else get_current_settings().server.database.sqlalchemy.connect_args.prepared_statement_cache_size
+        )
+        self.search_path: Optional[str] = (
+            search_path
+            or get_current_settings().server.database.sqlalchemy.connect_args.search_path
         )
 
     def unique_key(self) -> tuple[Hashable, ...]:
@@ -212,14 +220,6 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
     async def engine(self) -> AsyncEngine:
         """Retrieves an async SQLAlchemy engine.
 
-        Args:
-            connection_url (str, optional): The database connection string.
-                Defaults to self.connection_url
-            echo (bool, optional): Whether to echo SQL sent
-                to the database. Defaults to self.echo
-            timeout (float, optional): The database statement timeout, in seconds.
-                Defaults to self.timeout
-
         Returns:
             AsyncEngine: a SQLAlchemy engine
         """
@@ -243,8 +243,17 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
             if self.timeout is not None:
                 connect_args["command_timeout"] = self.timeout
 
-            if self.connection_timeout is not None:
-                connect_args["timeout"] = self.connection_timeout
+            # In test mode, use a higher connection timeout to handle the heavy
+            # load of parallel test execution (pytest-xdist). Establishing a new
+            # asyncpg connection can occasionally take longer than the 5s default
+            # under CI load, which surfaces as a TimeoutError during fixture
+            # setup. Keep the configured value if the user has already raised it.
+            connection_timeout = self.connection_timeout
+            if PREFECT_TESTING_UNIT_TEST_MODE.value() is True:
+                connection_timeout = max(connection_timeout or 0.0, 30.0)
+
+            if connection_timeout is not None:
+                connect_args["timeout"] = connection_timeout
 
             if self.statement_cache_size is not None:
                 connect_args["statement_cache_size"] = self.statement_cache_size
@@ -254,10 +263,36 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
                     self.prepared_statement_cache_size
                 )
 
+            server_settings: dict[str, str] = {}
             if self.connection_app_name is not None:
-                connect_args["server_settings"] = dict(
-                    application_name=self.connection_app_name
+                server_settings["application_name"] = self.connection_app_name
+            if self.search_path is not None:
+                server_settings["search_path"] = self.search_path
+
+            # asyncpg treats connection-URI query parameters like
+            # `default_transaction_isolation` as startup server settings, but
+            # SQLAlchemy's asyncpg dialect forwards URL query parameters as plain
+            # keyword arguments. Move any such settings into the `server_settings`
+            # connect argument so they are applied at connection startup.
+            engine_url = make_url(self.connection_url)
+            if "default_transaction_isolation" in engine_url.query:
+                server_settings["default_transaction_isolation"] = (
+                    engine_url.query["default_transaction_isolation"][-1]
+                    if isinstance(
+                        engine_url.query["default_transaction_isolation"], tuple
+                    )
+                    else engine_url.query["default_transaction_isolation"]
                 )
+                engine_url = engine_url.set(
+                    query={
+                        k: v
+                        for k, v in engine_url.query.items()
+                        if k != "default_transaction_isolation"
+                    }
+                )
+
+            if server_settings:
+                connect_args["server_settings"] = server_settings
 
             if get_current_settings().server.database.sqlalchemy.connect_args.tls.enabled:
                 tls_config = (
@@ -282,6 +317,33 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
                 pg_ctx.verify_mode = ssl.CERT_REQUIRED
                 connect_args["ssl"] = pg_ctx
 
+            # Initialize plugin manager
+            if get_current_settings().plugins.enabled:
+                pm = build_manager(HookSpec)
+                load_entry_point_plugins(
+                    pm,
+                    allow=get_current_settings().plugins.allow,
+                    deny=get_current_settings().plugins.deny,
+                    logger=logging.getLogger("prefect.plugins"),
+                )
+
+                # Call set_database_connection_params hook
+                results = await call_async_hook(
+                    pm,
+                    "set_database_connection_params",
+                    connection_url=self.connection_url,
+                    settings=get_current_settings(),
+                )
+
+                for _, params, error in results:
+                    if error:
+                        # Log error but don't fail, other plugins might succeed
+                        logging.getLogger("prefect.server.database").warning(
+                            "Plugin failed to set database connection params: %s", error
+                        )
+                    elif params:
+                        connect_args.update(params)
+
             if connect_args:
                 kwargs["connect_args"] = connect_args
 
@@ -292,8 +354,14 @@ class AsyncPostgresConfiguration(BaseDatabaseConfiguration):
                 kwargs["max_overflow"] = self.sqlalchemy_max_overflow
 
             engine = create_async_engine(
-                self.connection_url,
+                engine_url,
                 echo=self.echo,
+                # Prefect's conditional concurrency-counter updates depend on
+                # PostgreSQL's READ COMMITTED behavior: a waiting writer re-reads
+                # the latest committed row and re-evaluates its predicate before
+                # applying the change. Enforce the isolation level explicitly so
+                # correctness does not depend on database or role defaults.
+                isolation_level="READ COMMITTED",
                 # "pre-ping" connections upon checkout to ensure they have not been
                 # closed on the server side
                 pool_pre_ping=True,
@@ -383,14 +451,6 @@ class AioSqliteConfiguration(BaseDatabaseConfiguration):
     async def engine(self) -> AsyncEngine:
         """Retrieves an async SQLAlchemy engine.
 
-        Args:
-            connection_url (str, optional): The database connection string.
-                Defaults to self.connection_url
-            echo (bool, optional): Whether to echo SQL sent
-                to the database. Defaults to self.echo
-            timeout (float, optional): The database statement timeout, in seconds.
-                Defaults to self.timeout
-
         Returns:
             AsyncEngine: a SQLAlchemy engine
         """
@@ -409,7 +469,11 @@ class AioSqliteConfiguration(BaseDatabaseConfiguration):
         cache_key = (loop, self.connection_url, self.echo, self.timeout)
         if cache_key not in ENGINES:
             # apply database timeout
-            if self.timeout is not None:
+            # In test mode, use a higher timeout to handle lock contention during
+            # parallel test execution. This should match the PRAGMA busy_timeout.
+            if PREFECT_TESTING_UNIT_TEST_MODE.value() is True:
+                kwargs["connect_args"] = dict(timeout=30.0)  # 30s for tests
+            elif self.timeout is not None:
                 kwargs["connect_args"] = dict(timeout=self.timeout)
 
             # use `named` paramstyle for sqlite instead of `qmark` in very rare
@@ -506,7 +570,7 @@ class AioSqliteConfiguration(BaseDatabaseConfiguration):
         # setting the value very high allows for more 'concurrency'
         # without running into errors, but may result in slow api calls
         if PREFECT_TESTING_UNIT_TEST_MODE.value() is True:
-            cursor.execute("PRAGMA busy_timeout = 5000;")  # 5s
+            cursor.execute("PRAGMA busy_timeout = 30000;")  # 30s
         else:
             cursor.execute("PRAGMA busy_timeout = 60000;")  # 60s
 

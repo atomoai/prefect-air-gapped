@@ -10,13 +10,14 @@ from base64 import b64decode
 from typing import Annotated, Any, Optional
 from uuid import UUID
 
+from docket import Docket as Docket_
 from fastapi import Body, Depends, Header, HTTPException
 from packaging.version import Version
 from starlette.requests import Request
 
 from prefect._internal.compatibility.starlette import status
 from prefect.server import schemas
-from prefect.settings import PREFECT_API_DEFAULT_LIMIT
+from prefect.settings import PREFECT_SERVER_API_DEFAULT_LIMIT
 
 
 def provide_request_api_version(
@@ -110,10 +111,10 @@ def LimitBody() -> Any:
     def get_limit(
         limit: int = Body(
             None,
-            description="Defaults to PREFECT_API_DEFAULT_LIMIT if not provided.",
+            description="Defaults to PREFECT_SERVER_API_DEFAULT_LIMIT if not provided.",
         ),
     ):
-        default_limit = PREFECT_API_DEFAULT_LIMIT.value()
+        default_limit = PREFECT_SERVER_API_DEFAULT_LIMIT.value()
         limit = limit if limit is not None else default_limit
         if not limit >= 0:
             raise HTTPException(
@@ -195,3 +196,10 @@ def get_prefect_client_version(
     if client_version := PREFECT_CLIENT_USER_AGENT_PATTERN.match(user_agent):
         return client_version.group(1)
     return None
+
+
+def docket(request: Request) -> Docket_:
+    return request.app.state.docket
+
+
+Docket = Annotated[Docket_, Depends(docket)]

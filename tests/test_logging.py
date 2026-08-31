@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import sys
+import threading
 import time
 import uuid
+from collections import ChainMap
 from contextlib import nullcontext
 from datetime import datetime
 from functools import partial
@@ -19,28 +22,35 @@ from rich.color import Color, ColorType
 from rich.console import Console
 from rich.highlighter import NullHighlighter, ReprHighlighter
 from rich.style import Style
+from websockets.asyncio.client import ClientConnection
 
 import prefect
 import prefect.logging.configuration
 import prefect.settings
 from prefect import flow, task
 from prefect._internal.concurrency.api import create_call, from_sync
+from prefect._internal.concurrency.cancellation import CancelledError
 from prefect.client.orchestration import PrefectClient
+from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 from prefect.context import FlowRunContext, TaskRunContext
 from prefect.exceptions import MissingContextError
 from prefect.logging import LogEavesdropper
 from prefect.logging.configuration import (
     DEFAULT_LOGGING_SETTINGS_PATH,
+    ensure_logging_setup,
     load_logging_config,
     setup_logging,
 )
 from prefect.logging.filters import ObfuscateApiKeyFilter
-from prefect.logging.formatters import JsonFormatter
+from prefect.logging.formatters import JsonFormatter, PrefectFormatter
 from prefect.logging.handlers import (
     APILogHandler,
     APILogWorker,
     PrefectConsoleHandler,
     WorkerAPILogHandler,
+    _SafeStreamHandler,
+    emit_api_log,
+    set_api_log_sink,
 )
 from prefect.logging.highlighters import PrefectConsoleHighlighter
 from prefect.logging.loggers import (
@@ -54,9 +64,12 @@ from prefect.logging.loggers import (
     patch_print,
     task_run_logger,
 )
+from prefect.runtime import deployment as runtime_deployment
 from prefect.server.schemas.actions import LogCreate
 from prefect.settings import (
     PREFECT_API_KEY,
+    PREFECT_API_URL,
+    PREFECT_CLOUD_MAX_LOG_SIZE,
     PREFECT_LOGGING_COLORS,
     PREFECT_LOGGING_EXTRA_LOGGERS,
     PREFECT_LOGGING_LEVEL,
@@ -278,6 +291,22 @@ def test_setup_logging_applies_root_config_when_no_prior_configuration(
     assert called_config["root"]["handlers"] == ["console"]
 
 
+def test_ensure_logging_setup_calls_setup_logging_when_not_configured(
+    dictConfigMock: MagicMock,
+):
+    ensure_logging_setup()
+    dictConfigMock.assert_called_once()
+
+
+def test_ensure_logging_setup_is_idempotent(dictConfigMock: MagicMock):
+    ensure_logging_setup()
+    ensure_logging_setup()
+    ensure_logging_setup()
+    # setup_logging should only be called once since PROCESS_LOGGING_CONFIG
+    # is populated after the first call
+    dictConfigMock.assert_called_once()
+
+
 def test_setting_aliases_respected_for_logging_config(tmp_path: Path):
     logging_config_content = """
 loggers:
@@ -432,7 +461,8 @@ class TestAPILogHandler:
         logger.info("Test", extra={"flow_run_id": flow_run.id})
         await handler.aflush()
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run.id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 2
 
     async def test_logs_can_still_be_sent_after_flush(
@@ -447,7 +477,8 @@ class TestAPILogHandler:
         logger.info("Test", extra={"flow_run_id": flow_run.id})
         await handler.aflush()
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run.id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 2
 
     async def test_sync_flush_from_async_context(
@@ -463,7 +494,8 @@ class TestAPILogHandler:
         # Yield to the worker thread
         time.sleep(2)
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run.id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 1
 
     def test_sync_flush_from_global_event_loop(
@@ -514,6 +546,34 @@ class TestAPILogHandler:
         expected["__payload_size__"] = ANY  # Tested separately
 
         mock_log_worker.instance().send.assert_called_once_with(expected)
+
+    def test_sends_log_to_overridden_sink(
+        self,
+        logger: logging.Logger,
+        mock_log_worker: MagicMock,
+        flow_run: "FlowRun",
+    ):
+        log_sink = MagicMock()
+        set_api_log_sink(log_sink)
+
+        try:
+            with FlowRunContext.model_construct(flow_run=flow_run):
+                logger.info("test-flow")
+        finally:
+            set_api_log_sink(None)
+
+        log_sink.assert_called_once()
+        mock_log_worker.instance().send.assert_not_called()
+
+    def test_emit_api_log_sends_to_worker_without_override(
+        self, mock_log_worker: MagicMock
+    ):
+        set_api_log_sink(None)
+        payload = {"message": "test-api-log"}
+
+        emit_api_log(payload)
+
+        mock_log_worker.instance().send.assert_called_once_with(payload)
 
     @pytest.mark.parametrize("with_context", [True, False])
     def test_respects_explicit_flow_run_id(
@@ -874,7 +934,6 @@ class TestAPILogHandler:
         sent_log = mock_log_worker.instance().send.call_args[0][0]
         output = capsys.readouterr()
         assert sent_log["message"].endswith("... [truncated]")
-        assert sent_log["__payload_truncated__"] is True
         assert "ValueError" not in output.err
 
     def test_handler_knows_how_large_logs_are(self):
@@ -892,8 +951,78 @@ class TestAPILogHandler:
         handler = APILogHandler()
         assert handler._get_payload_size(dict_log) == log_size  # type: ignore[reportPrivateUsage]
 
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_defaults_to_cloud_value(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "https://api.prefect.cloud/api"},
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 25_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_defaults_to_cloud_setting(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_CLOUD_MAX_LOG_SIZE: 10_000,
+            },
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 10_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_respects_custom_value_lower_than_cloud(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 10_000,
+            },
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 10_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_capped_at_cloud_max(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api",
+                PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 1_000_000,
+            },
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 25_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_does_not_change_for_self_hosted(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "http://example.com/api"},
+            restore_defaults={PREFECT_LOGGING_TO_API_MAX_LOG_SIZE},
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 1_000_000
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_max_log_size_default_when_not_connected(self):
+        with temporary_settings(
+            restore_defaults={PREFECT_API_URL, PREFECT_LOGGING_TO_API_MAX_LOG_SIZE}
+        ) as settings:
+            assert settings.logging.to_api.max_log_size == 1_000_000
+
 
 WORKER_ID = uuid.uuid4()
+
+
+class _WorkerChannelTestDouble:
+    def __init__(self, worker: BaseWorker[Any, Any, Any], worker_id: uuid.UUID | None):
+        self._worker = worker
+        self._worker_id = worker_id
+
+    def set_client(self, client: PrefectClient) -> None:
+        pass
+
+    async def sync(self, task_group: Any) -> None:
+        if self._worker_id is not None:
+            self._worker._record_worker_id(self._worker_id)
+
+    def stop(self) -> None:
+        pass
 
 
 class TestWorkerLogging:
@@ -901,12 +1030,12 @@ class TestWorkerLogging:
         type: str = "cloud_logging_test"
         job_configuration = BaseJobConfiguration
 
-        async def _send_worker_heartbeat(self, *_, **__):
-            """
-            Workers only return an ID here if they're connected to Cloud,
-            so this simulates the worker being connected to Cloud.
-            """
-            return WORKER_ID
+        def _ensure_worker_channel(self) -> None:
+            if self._worker_channel is not None:
+                self._worker_channel.set_client(self._client)
+                return
+
+            self._worker_channel = _WorkerChannelTestDouble(self, WORKER_ID)
 
         async def run(self, *_, **__):
             pass
@@ -918,12 +1047,12 @@ class TestWorkerLogging:
         async def run(self, *_, **__):
             pass
 
-        async def _send_worker_heartbeat(self, *_, **__):
-            """
-            Workers only return an ID here if they're connected to Cloud,
-            so this simulates the worker not being connected to Cloud.
-            """
-            return None
+        def _ensure_worker_channel(self) -> None:
+            if self._worker_channel is not None:
+                self._worker_channel.set_client(self._client)
+                return
+
+            self._worker_channel = _WorkerChannelTestDouble(self, None)
 
     @pytest.fixture
     def logging_to_api_enabled(self):
@@ -1033,7 +1162,10 @@ class TestAPILogWorker:
     ):
         worker.send(log_dict)
         await worker.drain()
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(
+            flow_run_id=LogFilterFlowRunId(any_=[uuid.UUID(log_dict["flow_run_id"])])
+        )
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 1
         assert logs[0].model_dump(include=log_dict.keys(), mode="json") == log_dict
 
@@ -1045,6 +1177,7 @@ class TestAPILogWorker:
     ):
         # Use the read limit as the count since we'd need multiple read calls otherwise
         count = prefect.settings.PREFECT_API_DEFAULT_LIMIT.value()
+        flow_run_id = uuid.UUID(log_dict["flow_run_id"])
         log_dict.pop("message")
 
         for i in range(count):
@@ -1053,7 +1186,8 @@ class TestAPILogWorker:
             worker.send(new_log)
         await worker.drain()
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == count
         for log in logs:
             assert (
@@ -1111,6 +1245,7 @@ class TestAPILogWorker:
         self, log_dict: dict[str, Any], prefect_client: PrefectClient
     ):
         # Set a long interval
+        flow_run_id = uuid.UUID(log_dict["flow_run_id"])
         start_time = time.time()
         with temporary_settings(updates={PREFECT_LOGGING_TO_API_BATCH_INTERVAL: "10"}):
             worker = APILogWorker.instance()
@@ -1123,7 +1258,8 @@ class TestAPILogWorker:
             end_time - start_time
         ) < 5  # An arbitrary time less than the 10s interval
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 2
 
     async def test_logs_are_sent_immediately_when_flushed(
@@ -1133,6 +1269,7 @@ class TestAPILogWorker:
         worker: APILogWorker,
     ):
         # Set a long interval
+        flow_run_id = uuid.UUID(log_dict["flow_run_id"])
         start_time = time.time()
         with temporary_settings(updates={PREFECT_LOGGING_TO_API_BATCH_INTERVAL: "10"}):
             worker.send(log_dict)
@@ -1144,7 +1281,8 @@ class TestAPILogWorker:
             end_time - start_time
         ) < 5  # An arbitrary time less than the 10s interval
 
-        logs = await prefect_client.read_logs()
+        log_filter = LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
+        logs = await prefect_client.read_logs(log_filter=log_filter)
         assert len(logs) == 2
 
     async def test_logs_include_worker_id_if_available(
@@ -1171,6 +1309,7 @@ def test_flow_run_logger(flow_run: "FlowRun"):
         "flow_run_name": flow_run.name,
         "flow_run_id": str(flow_run.id),
         "flow_name": "<unknown>",
+        "deployment_name": None,
     }
 
 
@@ -1187,6 +1326,70 @@ def test_flow_run_logger_with_kwargs(flow_run: "FlowRun"):
     logger = flow_run_logger(flow_run, foo="test", flow_run_name="bar")
     assert logger.extra["foo"] == "test"
     assert logger.extra["flow_run_name"] == "bar"
+
+
+def test_flow_run_logger_with_kwargs_overrides_deployment_name(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    flow_run.deployment_id = uuid.uuid4()
+    logger = flow_run_logger(flow_run, deployment_name="custom-deployment")
+    assert logger.extra["deployment_name"] == "custom-deployment"
+
+
+def test_flow_run_logger_includes_deployment_name_from_env(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    flow_run.deployment_id = uuid.uuid4()
+    logger = flow_run_logger(flow_run)
+    assert logger.extra["deployment_name"] == "test-deployment"
+
+
+def test_flow_run_logger_omits_deployment_name_without_deployment_id(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    logger = flow_run_logger(flow_run)
+    assert logger.extra["deployment_name"] is None
+
+
+def test_flow_run_logger_omits_deployment_name_for_child_flow_run(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    flow_run.deployment_id = uuid.uuid4()
+    flow_run.parent_task_run_id = uuid.uuid4()
+    logger = flow_run_logger(flow_run)
+    assert logger.extra["deployment_name"] is None
+
+
+def test_flow_run_logger_with_bare_flow_run_id():
+    run_id = uuid.uuid4()
+    logger = flow_run_logger(flow_run_id=run_id)
+    assert logger.name == "prefect.flow_runs"
+    assert logger.extra == {
+        "flow_run_name": "<unknown>",
+        "flow_run_id": str(run_id),
+        "flow_name": "<unknown>",
+        "deployment_name": None,
+    }
+
+
+def test_flow_run_logger_with_flow_run_and_flow_run_id(flow_run: "FlowRun"):
+    """When both flow_run and flow_run_id are provided, flow_run takes precedence."""
+    other_id = uuid.uuid4()
+    logger = flow_run_logger(flow_run, flow_run_id=other_id)
+    assert logger.extra["flow_run_id"] == str(flow_run.id)
+    assert logger.extra["flow_run_name"] == flow_run.name
+
+
+def test_flow_run_logger_raises_without_flow_run_or_flow_run_id():
+    """Calling flow_run_logger without any identifier raises ValueError."""
+    with pytest.raises(
+        ValueError, match="Either 'flow_run' or 'flow_run_id' must be provided"
+    ):
+        flow_run_logger()
 
 
 def test_task_run_logger(task_run: "TaskRun"):
@@ -1226,6 +1429,36 @@ def test_task_run_logger_with_flow(task_run: "TaskRun"):
     assert logger.extra["flow_name"] == "foo"
 
 
+def test_flow_run_logger_includes_deployment_name_without_runtime_api_calls(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    flow_run.deployment_id = uuid.uuid4()
+
+    with mock.patch.object(runtime_deployment, "_get_deployment") as get_deployment:
+        flow_logger = flow_run_logger(flow_run)
+
+    assert flow_logger.extra["deployment_name"] == "test-deployment"
+    get_deployment.assert_not_called()
+
+
+def test_deployment_name_is_available_to_run_formatters(
+    flow_run: "FlowRun", monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PREFECT__DEPLOYMENT_NAME", "test-deployment")
+    flow_run.deployment_id = uuid.uuid4()
+    formatter = PrefectFormatter(
+        format="%(message)s",
+        flow_run_fmt="%(deployment_name)s | %(message)s",
+    )
+
+    flow_record = logging.LogRecord(
+        "prefect.flow_runs", logging.INFO, __file__, 0, "hello", (), None
+    )
+    flow_record.__dict__.update(flow_run_logger(flow_run).extra)
+    assert formatter.format(flow_record) == "test-deployment | hello"
+
+
 def test_task_run_logger_with_flow_run_from_context(
     task_run: "TaskRun", flow_run: "FlowRun"
 ):
@@ -1259,6 +1492,7 @@ def test_run_logger_with_flow_run_context_without_parent_flow_run_id(
         assert logger.extra["flow_run_id"] == "<unknown>"
         assert logger.extra["flow_run_name"] == "<unknown>"
         assert logger.extra["flow_name"] == "<unknown>"
+        assert logger.extra["deployment_name"] is None
 
 
 async def test_run_logger_with_task_run_context_without_parent_flow_run_id(
@@ -1368,6 +1602,7 @@ async def test_run_logger_in_flow(prefect_client: PrefectClient):
         "flow_name": test_flow.name,
         "flow_run_id": str(flow_run.id),
         "flow_run_name": flow_run.name,
+        "deployment_name": None,
     }
 
 
@@ -1385,6 +1620,7 @@ async def test_run_logger_extra_data(prefect_client: PrefectClient):
         "foo": "test",
         "flow_run_id": str(flow_run.id),
         "flow_run_name": flow_run.name,
+        "deployment_name": None,
     }
 
 
@@ -1405,6 +1641,7 @@ async def test_run_logger_in_nested_flow(prefect_client: PrefectClient):
         "flow_name": child_flow.name,
         "flow_run_id": str(flow_run.id),
         "flow_run_name": flow_run.name,
+        "deployment_name": None,
     }
 
 
@@ -1436,6 +1673,104 @@ async def test_run_logger_in_task(
         "flow_run_id": str(flow_run.id),
         "flow_run_name": flow_run.name,
     }
+
+
+class Test_SafeStreamHandler:
+    """Regression tests for https://github.com/PrefectHQ/prefect/issues/16626"""
+
+    def test_emit_with_closed_stream_does_not_raise(
+        self, capsys: pytest.CaptureFixture[str]
+    ):
+        stream = StringIO()
+        stream.close()
+        handler = _SafeStreamHandler(stream=stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        logger = logging.getLogger("test.safe_stream.closed")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            logger.debug("this should be silently dropped")
+        finally:
+            logger.removeHandler(handler)
+
+        captured = capsys.readouterr()
+        assert "I/O operation on closed file" not in captured.err
+
+    def test_emit_with_open_stream_works(self):
+        stream = StringIO()
+        handler = _SafeStreamHandler(stream=stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        logger = logging.getLogger("test.safe_stream.open")
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        try:
+            logger.debug("hello")
+        finally:
+            logger.removeHandler(handler)
+
+        assert "hello" in stream.getvalue()
+
+    def test_async_cancellation_does_not_leave_handler_locked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Python <=3.12 acquires the handler lock before entering try/finally in
+        # both handle() and flush(). Patch those implementations in so this
+        # remains a regression test when the suite runs on a newer Python.
+        def python_312_handle(
+            handler: logging.Handler, record: logging.LogRecord
+        ) -> bool | logging.LogRecord:
+            filtered = handler.filter(record)
+            if isinstance(filtered, logging.LogRecord):
+                record = filtered
+            if filtered:
+                handler.acquire()
+                try:
+                    handler.emit(record)
+                finally:
+                    handler.release()
+            return filtered
+
+        def python_312_flush(handler: logging.StreamHandler) -> None:
+            handler.acquire()
+            try:
+                if handler.stream and hasattr(handler.stream, "flush"):
+                    handler.stream.flush()
+            finally:
+                handler.release()
+
+        monkeypatch.setattr(logging.Handler, "handle", python_312_handle)
+        monkeypatch.setattr(logging.StreamHandler, "flush", python_312_flush)
+
+        handler = _SafeStreamHandler(stream=StringIO())
+        acquire = handler.acquire
+
+        def interrupt_acquire() -> None:
+            acquire()
+            raise CancelledError()
+
+        monkeypatch.setattr(handler, "acquire", interrupt_acquire)
+        record = logging.makeLogRecord({"msg": "test"})
+
+        def handle_record() -> None:
+            try:
+                handler.handle(record)
+            except CancelledError:
+                pass
+
+        thread = threading.Thread(target=handle_record)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+        assert handler.lock is not None
+        lock_is_available = handler.lock.acquire(timeout=0.1)
+        if lock_is_available:
+            handler.lock.release()
+        else:
+            handler.createLock()
+        assert lock_is_available
 
 
 class TestPrefectConsoleHandler:
@@ -1612,6 +1947,48 @@ class TestJsonFormatter:
         assert deserialized["exc_info"]["traceback"] is not None
         assert len(deserialized["exc_info"]["traceback"]) > 0
 
+    def test_json_log_formatter_handles_non_serializable_objects(self):
+        """Test that JsonFormatter handles non-serializable objects gracefully.
+
+        Regression test for: https://github.com/PrefectHQ/prefect/issues/OSS-7568
+
+        When log records contain objects that can't be JSON serialized (e.g.,
+        websocket connections), the formatter should gracefully fall back to
+        a placeholder representation instead of crashing while preserving
+        valid serializable fields like timestamps and UUIDs.
+        """
+        formatter = JsonFormatter("default", None, "%")
+
+        mock_connection = MagicMock(spec=ClientConnection)
+        mock_connection.__class__ = ClientConnection
+
+        test_uuid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        test_timestamp = datetime.now()
+
+        record = logging.LogRecord(
+            name="Test Log",
+            level=logging.ERROR,
+            pathname="/path/file.py",
+            lineno=1,
+            msg="WebSocket error",
+            args=None,
+            exc_info=None,
+        )
+        record.connection = mock_connection
+        record.request_id = test_uuid
+        record.event_time = test_timestamp
+
+        formatted = formatter.format(record)
+
+        deserialized = json.loads(formatted)
+
+        assert deserialized["name"] == "Test Log"
+        assert deserialized["msg"] == "WebSocket error"
+        assert "<non-serializable:" in deserialized["connection"]
+        assert deserialized["request_id"] == str(test_uuid)
+        assert deserialized["event_time"] == test_timestamp.isoformat()
+        assert isinstance(deserialized["created"], float)
+
 
 class TestObfuscateApiKeyFilter:
     def test_filters_current_api_key(self):
@@ -1625,6 +2002,111 @@ class TestObfuscateApiKeyFilter:
                 lineno=1,
                 msg=test_api_key,
                 args=None,
+                exc_info=None,
+            )
+
+            filter.filter(record)
+
+        assert test_api_key not in record.getMessage()
+        assert obfuscate(test_api_key) in record.getMessage()
+
+    def test_filters_current_api_key_from_positional_args(self):
+        test_api_key = "lazy-positional-api-key"
+        with temporary_settings({PREFECT_API_KEY: test_api_key}):
+            filter = ObfuscateApiKeyFilter()
+            record = logging.LogRecord(
+                name="Test Log",
+                level=1,
+                pathname="/path/file.py",
+                lineno=1,
+                msg="api_key=%s",
+                args=(test_api_key,),
+                exc_info=None,
+            )
+
+            filter.filter(record)
+
+        assert test_api_key not in record.getMessage()
+        assert obfuscate(test_api_key) in record.getMessage()
+
+    def test_filters_current_api_key_from_mapping_args(self):
+        test_api_key = "lazy-mapping-api-key"
+        with temporary_settings({PREFECT_API_KEY: test_api_key}):
+            filter = ObfuscateApiKeyFilter()
+            record = logging.LogRecord(
+                name="Test Log",
+                level=1,
+                pathname="/path/file.py",
+                lineno=1,
+                msg="api_key=%(api_key)s",
+                args=({"api_key": test_api_key},),
+                exc_info=None,
+            )
+
+            filter.filter(record)
+
+        assert test_api_key not in record.getMessage()
+        assert obfuscate(test_api_key) in record.getMessage()
+
+    def test_filters_current_api_key_from_non_dict_mapping_args(self):
+        test_api_key = "lazy-chainmap-api-key"
+        with temporary_settings({PREFECT_API_KEY: test_api_key}):
+            filter = ObfuscateApiKeyFilter()
+            record = logging.LogRecord(
+                name="Test Log",
+                level=1,
+                pathname="/path/file.py",
+                lineno=1,
+                msg="api_key=%(api_key)s",
+                args=(ChainMap({"api_key": test_api_key}),),
+                exc_info=None,
+            )
+
+            filter.filter(record)
+
+        assert test_api_key not in record.getMessage()
+        assert obfuscate(test_api_key) in record.getMessage()
+
+    def test_filters_current_api_key_from_exception_arg(self):
+        test_api_key = "lazy-exception-api-key"
+
+        class CustomException(Exception):
+            pass
+
+        with temporary_settings({PREFECT_API_KEY: test_api_key}):
+            filter = ObfuscateApiKeyFilter()
+            record = logging.LogRecord(
+                name="Test Log",
+                level=1,
+                pathname="/path/file.py",
+                lineno=1,
+                msg="api_key=%s",
+                args=(CustomException(test_api_key),),
+                exc_info=None,
+            )
+
+            filter.filter(record)
+
+        assert test_api_key not in record.getMessage()
+        assert obfuscate(test_api_key) in record.getMessage()
+
+    def test_filters_current_api_key_from_dataclass_arg(self):
+        test_api_key = "lazy-dataclass-api-key"
+
+        @dataclasses.dataclass
+        class Credentials:
+            api_key: str
+            other: str = dataclasses.field(init=False, default="other")
+
+        with temporary_settings({PREFECT_API_KEY: test_api_key}):
+            filter = ObfuscateApiKeyFilter()
+            record = logging.LogRecord(
+                name="Test Log",
+                level=1,
+                pathname="/path/file.py",
+                lineno=1,
+                msg="api_key=%s",
+                args=(Credentials(api_key=test_api_key),),
                 exc_info=None,
             )
 

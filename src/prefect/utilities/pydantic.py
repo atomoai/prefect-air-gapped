@@ -333,7 +333,8 @@ def parse_obj_as(
     origin: Optional[Any] = get_origin(type_)
     if origin is list and isinstance(data, dict):
         values_dict: dict[Any, Any] = data
-        data = next(iter(values_dict.values()))
+        if values_dict:
+            data = next(iter(values_dict.values()))
 
     parser: Callable[[Any], T] = getattr(adapter, f"validate_{mode}")
 
@@ -350,21 +351,27 @@ def handle_secret_render(value: object, context: dict[str, Any]) -> object:
     elif isinstance(value, BaseModel):
         # Pass the serialization mode if available in context
         mode = context.get("serialization_mode", "python")
+        by_alias = context.get("by_alias", False)
         if mode == "json":
             # For JSON mode with nested models, we need to recursively process fields
             # because regular Pydantic models don't understand include_secrets
 
-            json_data = value.model_dump(mode="json")
-            for field_name in type(value).model_fields:
+            json_data = value.model_dump(mode="json", by_alias=by_alias)
+            for field_name, field_info in type(value).model_fields.items():
                 field_value = getattr(value, field_name)
-                json_data[field_name] = visit_collection(
+                alias = field_info.serialization_alias or field_info.alias
+                if by_alias and alias:
+                    key = alias
+                else:
+                    key = field_name
+                json_data[key] = visit_collection(
                     expr=field_value,
                     visit_fn=partial(handle_secret_render, context=context),
                     return_data=True,
                 )
             return json_data
         else:
-            return value.model_dump(context=context)
+            return value.model_dump(by_alias=by_alias, context=context)
     return value
 
 
@@ -380,7 +387,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from ._deprecated import JsonPatch
+        from prefect._internal.deprecated import JsonPatch
 
         return JsonPatch
     else:

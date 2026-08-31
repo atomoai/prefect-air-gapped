@@ -11,11 +11,14 @@ from prefect.server import models, schemas
 from prefect.server.database import PrefectDBInterface, db_injector
 from prefect.server.events.clients import AssertingEventsClient
 from prefect.server.schemas.statuses import DeploymentStatus
-from prefect.server.services.foreman import Foreman
+from prefect.server.services.foreman import monitor_worker_health
 from prefect.settings import (
     PREFECT_API_SERVICES_FOREMAN_FALLBACK_HEARTBEAT_INTERVAL_SECONDS,
     PREFECT_API_SERVICES_FOREMAN_INACTIVITY_HEARTBEAT_MULTIPLE,
 )
+from prefect.settings.context import get_current_settings
+
+pytestmark = pytest.mark.clear_db
 
 if TYPE_CHECKING:
     from prefect.server.database.orm_models import (
@@ -257,7 +260,9 @@ class TestForeman:
         await create_online_worker_with_old_heartbeat(session, ready_work_pool)
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check worker is marked offline
         workers_response = await client.post(
@@ -305,7 +310,9 @@ class TestForeman:
         assert ready_work_pool.status == schemas.statuses.WorkPoolStatus.READY
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check one worker is marked offline
         workers_response = await client.post(
@@ -342,7 +349,9 @@ class TestForeman:
         """
         assert paused_work_pool.status == schemas.statuses.WorkPoolStatus.PAUSED
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check work pool is still marked paused
         work_pool_response = await client.get(f"/work_pools/{paused_work_pool.name}")
@@ -385,7 +394,9 @@ class TestForeman:
 
         assert work_pool_response.json()["status"] == "NOT_READY"
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         work_pool_response = await client.get(f"/work_pools/{not_ready_work_pool.name}")
 
@@ -406,7 +417,9 @@ class TestForeman:
         )
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check worker is marked offline
         workers_response = await client.post(
@@ -421,6 +434,7 @@ class TestForeman:
         session: AsyncSession,
         ready_work_pool,
         client,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """
         Events should be properly ordered via follows when work pool status
@@ -429,7 +443,9 @@ class TestForeman:
         await create_online_worker_with_old_heartbeat(session, ready_work_pool)
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check worker is marked offline
         workers_response = await client.post(
@@ -455,7 +471,12 @@ class TestForeman:
 
         assert work_pools_response.json()["status"] == "READY"
 
-        await Foreman(inactivity_heartbeat_multiple=0).run_once()
+        # Set inactivity_heartbeat_multiple to 0 to immediately mark worker as offline
+        settings = get_current_settings().server.services.foreman
+        monkeypatch.setattr(settings, "inactivity_heartbeat_multiple", 0)
+
+        # Don't reset here: this test counts events across both foreman runs
+        await monitor_worker_health()
 
         # Check work pool is marked not_ready
         work_pools_response = await client.get(f"/work_pools/{ready_work_pool.name}")
@@ -485,7 +506,9 @@ class TestForeman:
         assert deployment.status == "READY"
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check deployment is marked not_ready
         response = await client.get(f"/deployments/{deployment.id}")
@@ -539,7 +562,9 @@ class TestForeman:
 
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check deployment remains ready
         response = await client.get(f"/deployments/{deployment.id}")
@@ -550,7 +575,9 @@ class TestForeman:
         assert len(events) == 0
 
     async def test_foreman_with_no_deployments_to_update(self):
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         assert not AssertingEventsClient.last
 
@@ -566,9 +593,10 @@ class TestForeman:
         assert deployment
         assert deployment.status == DeploymentStatus.READY
         assert deployment.last_polled is not None
+        settings = get_current_settings().server.services.foreman
         assert deployment.last_polled < (
             datetime.now(timezone.utc)
-            - timedelta(seconds=Foreman()._deployment_last_polled_timeout_seconds)
+            - timedelta(seconds=settings.deployment_last_polled_timeout_seconds)
         )
 
         await models.work_queues.update_work_queue(
@@ -581,7 +609,9 @@ class TestForeman:
 
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         assert not AssertingEventsClient.last
 
@@ -635,7 +665,6 @@ class TestForemanWorkQueueService:
         self,
         db: PrefectDBInterface,
         session: AsyncSession,
-        foreman: Foreman,
         *,
         count: int,
     ) -> List["ORMWorkQueue"]:
@@ -643,6 +672,7 @@ class TestForemanWorkQueueService:
         Create 'count' work queues that have not been polled for longer
         than foreman's timeout settings.
         """
+        settings = get_current_settings().server.services.foreman
         wp = await self.create_work_pool(session)
         queues = []
         for _ in range(count):
@@ -652,7 +682,7 @@ class TestForemanWorkQueueService:
                 status=schemas.statuses.WorkQueueStatus.READY,
                 last_polled=datetime.now(timezone.utc)
                 - timedelta(
-                    seconds=foreman._work_queue_last_polled_timeout_seconds + 5
+                    seconds=settings.work_queue_last_polled_timeout_seconds + 5
                 ),
             )
             queues.append(queue)
@@ -661,7 +691,6 @@ class TestForemanWorkQueueService:
     async def create_polled_work_queues(
         self,
         session: AsyncSession,
-        foreman: Foreman,
         *,
         count: int,
     ) -> List["ORMWorkQueue"]:
@@ -704,7 +733,7 @@ class TestForemanWorkQueueService:
         session: AsyncSession,
         client: AsyncClient,
     ):
-        foreman = Foreman()
+        settings = get_current_settings().server.services.foreman
 
         wp = await self.create_work_pool(session)
         wq = await self.create_work_queue(
@@ -712,13 +741,15 @@ class TestForemanWorkQueueService:
             wp,
             status=schemas.statuses.WorkQueueStatus.READY,
             last_polled=datetime.now(timezone.utc)
-            - timedelta(seconds=foreman._work_queue_last_polled_timeout_seconds + 5),
+            - timedelta(seconds=settings.work_queue_last_polled_timeout_seconds + 5),
         )
         assert wq.status == schemas.statuses.WorkQueueStatus.READY
 
         await session.commit()
 
-        await foreman.run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         wq_response = await client.get(f"/work_queues/{wq.id}")
         assert wq_response.status_code == 200
@@ -729,15 +760,15 @@ class TestForemanWorkQueueService:
         session: AsyncSession,
         client: AsyncClient,
     ):
-        foreman = Foreman()
-
-        work_queues = await self.create_unpolled_work_queues(session, foreman, count=3)
+        work_queues = await self.create_unpolled_work_queues(session, count=3)
         assert all(
             q.status == schemas.statuses.WorkQueueStatus.READY for q in work_queues
         )
         await session.commit()
 
-        await foreman.run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         for wq in work_queues:
             wq_response = await client.get(f"/work_queues/{wq.id}")
@@ -749,13 +780,13 @@ class TestForemanWorkQueueService:
         session: AsyncSession,
         client: AsyncClient,
     ) -> None:
-        foreman = Foreman()
-
-        wq = (await self.create_unpolled_work_queues(session, foreman, count=1))[0]
+        wq = (await self.create_unpolled_work_queues(session, count=1))[0]
         assert wq.status == schemas.statuses.WorkQueueStatus.READY
         await session.commit()
 
-        await foreman.run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Assert that the queue is marked as not ready
         wq_response = await client.get(f"/work_queues/{wq.id}")
@@ -766,7 +797,9 @@ class TestForemanWorkQueueService:
         await self.poll_work_queue_by_name(session, name=wq.name)
         await session.commit()
 
-        await foreman.run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Assert that queue is not marked as ready
         wq_response = await client.get(f"/work_queues/{wq.id}")
@@ -778,15 +811,15 @@ class TestForemanWorkQueueService:
         session: AsyncSession,
         client: AsyncClient,
     ):
-        foreman = Foreman()
-
-        work_queues = await self.create_polled_work_queues(session, foreman, count=3)
+        work_queues = await self.create_polled_work_queues(session, count=3)
         assert all(
             q.status == schemas.statuses.WorkQueueStatus.READY for q in work_queues
         )
         await session.commit()
 
-        await foreman.run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Assert that recently polled queues are unchanged
         for wq in work_queues:
@@ -804,13 +837,14 @@ class TestForemanWorkQueueService:
         Foreman should be able to update the status of multiple work queues.
         """
         now = datetime.now(timezone.utc)
+        settings = get_current_settings().server.services.foreman
 
         wq_1 = await self.create_work_queue(
             session,
             ready_work_pool,
             status=schemas.statuses.WorkQueueStatus.READY,
             last_polled=now
-            - timedelta(seconds=Foreman()._work_queue_last_polled_timeout_seconds + 5),
+            - timedelta(seconds=settings.work_queue_last_polled_timeout_seconds + 5),
         )
         assert wq_1.status == schemas.statuses.WorkQueueStatus.READY
 
@@ -819,13 +853,15 @@ class TestForemanWorkQueueService:
             ready_work_pool,
             status=schemas.statuses.WorkQueueStatus.READY,
             last_polled=now
-            - timedelta(seconds=Foreman()._work_queue_last_polled_timeout_seconds + 4),
+            - timedelta(seconds=settings.work_queue_last_polled_timeout_seconds + 4),
         )
         assert wq_2.status == schemas.statuses.WorkQueueStatus.READY
 
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         # Check work queues are marked not_ready
         wq_response_1 = await client.get(f"/work_queues/{wq_1.id}")
@@ -886,14 +922,14 @@ class TestForemanWorkQueueService:
         self,
         session: AsyncSession,
     ):
-        foreman = Foreman()
-
-        work_queues = await self.create_polled_work_queues(session, foreman, count=3)
+        work_queues = await self.create_polled_work_queues(session, count=3)
         assert all(
             q.status == schemas.statuses.WorkQueueStatus.READY for q in work_queues
         )
         await session.commit()
 
-        await Foreman().run_once()
+        # Count only events emitted by the foreman run, not fixture creation
+        AssertingEventsClient.reset()
+        await monitor_worker_health()
 
         assert len(AssertingEventsClient.all) == 0

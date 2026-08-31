@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Set, Tuple
+from typing import Coroutine, Set, Tuple
 from unittest.mock import AsyncMock
 
 import prefect_gitlab
@@ -139,6 +139,34 @@ class TestGitLab:
         ]
         assert mock.await_args[0][0][: len(expected_cmd)] == expected_cmd
 
+    async def test_get_directory_redacts_token_in_clone_error(self, monkeypatch):
+        class p:
+            returncode = 1
+
+        async def mock(cmd, stream_output=None, **kwargs):
+            if stream_output:
+                _, err_stream = stream_output
+                err_stream.write(
+                    "fatal: Authentication failed for "
+                    "'https://oauth2:p@ss:word#1@gitlab.com/PrefectHQ/prefect.git/'"
+                    "\nremote: token p@ss:word#1 rejected"
+                )
+            return p()
+
+        monkeypatch.setattr(prefect_gitlab.repositories, "run_process", mock)
+
+        g = GitLabRepository(
+            repository="https://gitlab.com/PrefectHQ/prefect.git",
+            credentials=GitLabCredentials(token=SecretStr("p@ss:word#1")),
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            await g.get_directory()
+
+        message = str(exc_info.value)
+        assert "p@ss:word#1" not in message
+        assert "https://gitlab.com/PrefectHQ/prefect.git/" in message
+
     async def test_cloning_with_custom_depth(self, monkeypatch):
         """Ensure that we can retrieve the whole history, i.e. support true git clone"""  # noqa: E501
 
@@ -252,3 +280,45 @@ class TestGitLab:
         print(mock.call_count)
         # Verify that the function retried the expected number of times
         assert mock.call_count == MAX_CLONE_ATTEMPTS
+
+
+class TestGitLabRepositoryAsyncDispatch:
+    """Tests for GitLabRepository.get_directory migrated from @sync_compatible to @async_dispatch.
+
+    These tests verify the critical behavior from issue #15008 where
+    @sync_compatible would incorrectly return coroutines in sync context.
+    """
+
+    def test_get_directory_sync_context_returns_none_not_coroutine(self, monkeypatch):
+        """get_directory must return None (not coroutine) in sync context.
+
+        This is the critical regression test for issues #14712 and #14625.
+        """
+        import subprocess
+        from unittest.mock import MagicMock
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        monkeypatch.setattr(subprocess, "run", MagicMock(return_value=mock_result))
+
+        g = GitLabRepository(repository="prefect")
+        result = g.get_directory()
+
+        assert not isinstance(result, Coroutine), "sync context returned coroutine"
+        assert result is None
+
+    async def test_get_directory_async_context_returns_coroutine(self, monkeypatch):
+        """get_directory should dispatch to async and return coroutine in async context."""
+
+        class p:
+            returncode = 0
+
+        mock = AsyncMock(return_value=p())
+        monkeypatch.setattr(prefect_gitlab.repositories, "run_process", mock)
+
+        g = GitLabRepository(repository="prefect")
+        result = g.get_directory()
+
+        assert isinstance(result, Coroutine)
+        await result  # should complete without error

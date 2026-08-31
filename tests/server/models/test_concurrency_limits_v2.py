@@ -1,10 +1,13 @@
 import asyncio
-from uuid import UUID
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
 import pytest
+import sqlalchemy as sa
 from pydantic import ValidationError
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from prefect.server import models, schemas
 from prefect.server.database import PrefectDBInterface
@@ -16,6 +19,7 @@ from prefect.server.models.concurrency_limits_v2 import (
     bulk_update_denied_slots,
     create_concurrency_limit,
     delete_concurrency_limit,
+    denied_slots_after_decay,
     read_all_concurrency_limits,
     read_concurrency_limit,
     update_concurrency_limit,
@@ -25,6 +29,8 @@ from prefect.server.schemas.actions import (
     ConcurrencyLimitV2Update,
 )
 from prefect.server.schemas.core import ConcurrencyLimitV2
+
+pytestmark = pytest.mark.clear_db
 
 
 @pytest.fixture
@@ -50,7 +56,10 @@ async def concurrency_limit_with_decay(session: AsyncSession) -> ConcurrencyLimi
         concurrency_limit=ConcurrencyLimitV2(
             name="test_limit_with_decay",
             limit=10,
-            slot_decay_per_second=10.0,
+            # Use a moderate decay rate to prevent race conditions in tests.
+            # With 5.0 decay/sec, it takes 0.2 seconds before any slot decays
+            # (since decay uses floor()), giving time for test assertions.
+            slot_decay_per_second=5.0,
         ),
     )
 
@@ -422,7 +431,7 @@ async def test_increment_active_slots_with_decay_slots_decay_over_time(
 
         await session.commit()
 
-    # `concurrency_limit_with_decay` has a decay of 10.0 slots/second.
+    # `concurrency_limit_with_decay` has a decay of 5.0 slots/second.
     # Immediately after filling to 10, we shouldn't be able to acquire 5 more.
     async with db.session_context() as session:
         assert not await bulk_increment_active_slots(
@@ -431,9 +440,9 @@ async def test_increment_active_slots_with_decay_slots_decay_over_time(
             slots=5,
         )
 
-    # After 1 second, all 10 slots should have decayed (10 * 1.0 = 10),
+    # After 2 seconds, all 10 slots should have decayed (5.0 * 2.0 = 10),
     # so we should be able to acquire 5 slots.
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(2.0)
 
     async with db.session_context() as session:
         assert await bulk_increment_active_slots(
@@ -605,3 +614,331 @@ async def test_bulk_update_denied_slots(
     )
     assert refreshed
     assert refreshed.denied_slots == 10
+
+
+async def test_denied_slots_decay_uses_clamped_value_for_tag_limits(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+):
+    """Verify tag limits decay at clamped rate (10s in OSS)."""
+    # Create limit with long avg_slot_occupancy_seconds
+    limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="tag:test-long-occupancy",
+            limit=10,
+            avg_slot_occupancy_seconds=120.0,  # 2 minutes
+        ),
+    )
+    await session.commit()
+
+    # Add 10 denied slots
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[limit.id],
+        slots=10,
+    )
+    await session.commit()
+
+    # Backdate updated timestamp by 30.5 seconds
+    backdated_time = datetime.now(timezone.utc) - timedelta(seconds=30.5)
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(updated=backdated_time)
+    )
+    await session.commit()
+
+    # Trigger recalculation while preserving backdated timestamp
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(
+            denied_slots=denied_slots_after_decay(db) + 0,
+            updated=backdated_time,  # Preserve timestamp
+        )
+    )
+    await session.commit()
+
+    # Verify: With 10s clamp, decay_rate = 1/10 = 0.1 slots/s
+    # 30.5s * 0.1 = 3.05 slots decayed
+    # Expected: 10 - floor(3.05) = 7 denied_slots
+    refreshed = await read_concurrency_limit(
+        session=session, concurrency_limit_id=limit.id
+    )
+    assert refreshed
+    assert refreshed.denied_slots == 7
+
+
+async def test_denied_slots_decay_uses_clamped_value_for_non_tag_limits(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+):
+    """Verify non-tag limits decay at clamped rate (30s in OSS)."""
+    limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="global:test-long-occupancy",
+            limit=10,
+            avg_slot_occupancy_seconds=120.0,
+        ),
+    )
+    await session.commit()
+
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[limit.id],
+        slots=30,
+    )
+    await session.commit()
+
+    backdated_time = datetime.now(timezone.utc) - timedelta(seconds=30.5)
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(updated=backdated_time)
+    )
+    await session.commit()
+
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(
+            denied_slots=denied_slots_after_decay(db) + 0,
+            updated=backdated_time,
+        )
+    )
+    await session.commit()
+
+    # Verify: With 30s clamp, decay_rate = 1/30 = 0.0333 slots/s
+    # 30.5s * 0.0333 = 1.02 slots decayed
+    # Expected: 30 - 1 = 29 denied_slots
+    refreshed = await read_concurrency_limit(
+        session=session, concurrency_limit_id=limit.id
+    )
+    assert refreshed
+    assert refreshed.denied_slots == 29
+
+
+async def test_denied_slots_decay_not_clamped_for_rate_limits(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+):
+    """Verify rate limits use slot_decay_per_second directly (no clamping)."""
+    limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="rate:test-explicit-decay",
+            limit=10,
+            slot_decay_per_second=2.0,  # 2 slots per second
+            avg_slot_occupancy_seconds=120.0,  # Should be ignored
+        ),
+    )
+    await session.commit()
+
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[limit.id],
+        slots=20,
+    )
+    await session.commit()
+
+    backdated_time = datetime.now(timezone.utc) - timedelta(seconds=5.0)
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(updated=backdated_time)
+    )
+    await session.commit()
+
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == limit.id)
+        .values(
+            denied_slots=denied_slots_after_decay(db) + 0,
+            updated=backdated_time,
+        )
+    )
+    await session.commit()
+
+    # Verify: 20 - floor(5s * 2.0 slots/s) = 10 denied_slots
+    refreshed = await read_concurrency_limit(
+        session=session, concurrency_limit_id=limit.id
+    )
+    assert refreshed
+    assert refreshed.denied_slots == 10
+
+
+def _set_event_on_concurrency_update(
+    engine: AsyncEngine,
+    acquired: asyncio.Event,
+    blocked: asyncio.Event,
+):
+    """Set `blocked` when a connection executes an UPDATE against concurrency_limit_v2
+    after `acquired` has been set."""
+
+    def before_cursor(
+        conn, cursor, statement, parameters, context, executemany
+    ) -> None:
+        if (
+            acquired.is_set()
+            and "UPDATE" in statement
+            and "concurrency_limit_v2" in statement
+        ):
+            blocked.set()
+
+    event.listen(engine.sync_engine, "before_cursor_execute", before_cursor)
+    return before_cursor
+
+
+async def test_contended_increment_waits_and_re_evaluates_at_read_committed(
+    db: PrefectDBInterface,
+    session: AsyncSession,
+):
+    """When two transactions try to increment the same limit and only one slot is
+    available, the second waits for the row lock and then returns False under READ
+    COMMITTED."""
+    if not db.database_config.connection_url.startswith("postgresql+asyncpg"):
+        pytest.skip("Test requires PostgreSQL")
+
+    limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name=f"contended-increment-{uuid4()}",
+            limit=1,
+            active_slots=0,
+        ),
+    )
+    await session.commit()
+
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+    blocked = asyncio.Event()
+    engine = await db.engine()
+    listener = _set_event_on_concurrency_update(engine, acquired, blocked)
+
+    async def t1() -> None:
+        async with db.session_context(begin_transaction=True) as session1:
+            result = await bulk_increment_active_slots(
+                session=session1,
+                concurrency_limit_ids=[limit.id],
+                slots=1,
+            )
+            assert result is True
+            acquired.set()
+            await release.wait()
+
+    async def t2() -> bool:
+        await acquired.wait()
+        async with db.session_context(begin_transaction=True) as session2:
+            return await bulk_increment_active_slots(
+                session=session2,
+                concurrency_limit_ids=[limit.id],
+                slots=1,
+            )
+
+    t1_task = asyncio.create_task(t1())
+    t2_task = asyncio.create_task(t2())
+
+    try:
+        try:
+            await asyncio.wait_for(blocked.wait(), timeout=5)
+        except TimeoutError:
+            raise AssertionError(
+                "Second transaction did not attempt an UPDATE while the first held the row lock"
+            )
+
+        release.set()
+        t2_result = await asyncio.wait_for(t2_task, timeout=5)
+        await asyncio.wait_for(t1_task, timeout=5)
+    finally:
+        release.set()
+        event.remove(engine.sync_engine, "before_cursor_execute", listener)
+        t1_task.cancel()
+        t2_task.cancel()
+
+    assert t2_result is False
+
+    async with db.session_context(begin_transaction=True) as final_session:
+        final_limit = await read_concurrency_limit(
+            session=final_session, concurrency_limit_id=limit.id
+        )
+        assert final_limit
+        assert final_limit.active_slots == 1
+
+
+async def test_contended_release_serializes_through_row_lock(
+    db: PrefectDBInterface,
+    session: AsyncSession,
+):
+    """When two transactions try to decrement the same limit, both succeed because
+    READ COMMITTED lets the second wait and then re-read the latest committed count."""
+    if not db.database_config.connection_url.startswith("postgresql+asyncpg"):
+        pytest.skip("Test requires PostgreSQL")
+
+    limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name=f"contended-release-{uuid4()}",
+            limit=10,
+            active_slots=2,
+        ),
+    )
+    await session.commit()
+
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+    blocked = asyncio.Event()
+    engine = await db.engine()
+    listener = _set_event_on_concurrency_update(engine, acquired, blocked)
+
+    async def t1() -> bool:
+        async with db.session_context(begin_transaction=True) as session1:
+            result = await bulk_decrement_active_slots(
+                session=session1,
+                concurrency_limit_ids=[limit.id],
+                slots=1,
+            )
+            acquired.set()
+            await release.wait()
+            return result
+
+    async def t2() -> bool:
+        await acquired.wait()
+        async with db.session_context(begin_transaction=True) as session2:
+            return await bulk_decrement_active_slots(
+                session=session2,
+                concurrency_limit_ids=[limit.id],
+                slots=1,
+            )
+
+    t1_task = asyncio.create_task(t1())
+    t2_task = asyncio.create_task(t2())
+
+    try:
+        try:
+            await asyncio.wait_for(blocked.wait(), timeout=5)
+        except TimeoutError:
+            raise AssertionError(
+                "Second transaction did not attempt an UPDATE while the first held the row lock"
+            )
+
+        release.set()
+        results = await asyncio.gather(
+            asyncio.wait_for(t1_task, timeout=5),
+            asyncio.wait_for(t2_task, timeout=5),
+        )
+    finally:
+        release.set()
+        event.remove(engine.sync_engine, "before_cursor_execute", listener)
+        t1_task.cancel()
+        t2_task.cancel()
+
+    assert all(results)
+
+    async with db.session_context(begin_transaction=True) as final_session:
+        final_limit = await read_concurrency_limit(
+            session=final_session, concurrency_limit_id=limit.id
+        )
+        assert final_limit
+        assert final_limit.active_slots == 0

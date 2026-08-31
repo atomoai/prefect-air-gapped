@@ -1,14 +1,14 @@
-import { useQueries, useQuery, useSuspenseQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { formatDuration, intervalToDuration, max } from "date-fns";
+import { differenceInSeconds, max, subSeconds } from "date-fns";
 import { useMemo } from "react";
+import { categorizeError } from "@/api/error-utils";
 import {
 	buildAverageLatenessFlowRunsQuery,
 	buildCountFlowRunsQuery,
 	buildFilterFlowRunsQuery,
 	type FlowRunsCountFilter,
 	type FlowRunsFilter,
-	type FlowRunWithDeploymentAndFlow,
 } from "@/api/flow-runs";
 import { getQueryService } from "@/api/service";
 import { buildListWorkPoolQueuesQuery } from "@/api/work-pool-queues";
@@ -18,26 +18,90 @@ import {
 	type WorkPool,
 } from "@/api/work-pools";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardErrorState } from "@/components/ui/card-error-state";
 import { FlowRunActivityBarChart } from "@/components/ui/flow-run-activity-bar-graph";
-import { FormattedDate } from "@/components/ui/formatted-date";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { WorkPoolIconText } from "@/components/work-pools/work-pool-icon-text";
 import { WorkPoolQueueStatusIcon } from "@/components/work-pools/work-pool-queue-status-icon";
 import { WorkPoolStatusIcon } from "@/components/work-pools/work-pool-status-icon";
-import { cn } from "@/utils";
+import { useNow } from "@/hooks/use-now";
+import {
+	cn,
+	formatDateTimeRelative,
+	secondsToApproximateString,
+} from "@/utils";
+import { WorkPoolsCardSkeleton } from "./work-pools-card-skeleton";
+
+type WorkPoolDashboardFilter = {
+	startDate?: string;
+	endDate?: string;
+	tags?: string[];
+	hideSubflows?: boolean;
+};
+
+/** Build the flow_runs filter object shared by all work-pool card queries. */
+function buildWorkPoolFlowRunsObj(
+	filter: WorkPoolDashboardFilter,
+): NonNullable<FlowRunsFilter["flow_runs"]> {
+	const obj: NonNullable<FlowRunsFilter["flow_runs"]> = {
+		operator: "and_",
+		expected_start_time: {
+			after_: filter.startDate,
+			before_: filter.endDate,
+		},
+	};
+
+	if (filter.tags && filter.tags.length > 0) {
+		obj.tags = {
+			operator: "and_",
+			all_: filter.tags,
+		};
+	}
+
+	if (filter.hideSubflows) {
+		obj.parent_task_run_id = {
+			operator: "and_",
+			is_null_: true,
+		};
+	}
+
+	return obj;
+}
 
 type DashboardWorkPoolsCardProps = {
-	filter?: {
-		startDate?: string;
-		endDate?: string;
-	};
+	filter?: WorkPoolDashboardFilter;
 };
 
 export const DashboardWorkPoolsCard = ({
 	filter,
 }: DashboardWorkPoolsCardProps) => {
-	const { data: workPools } = useSuspenseQuery(
-		buildFilterWorkPoolsQuery({ offset: 0 }),
-	);
+	const workPoolsQuery = useQuery(buildFilterWorkPoolsQuery({ offset: 0 }));
 
+	// Handle error state
+	if (workPoolsQuery.isError) {
+		return (
+			<CardErrorState
+				error={categorizeError(
+					workPoolsQuery.error,
+					"Failed to load work pools",
+				)}
+				onRetry={() => void workPoolsQuery.refetch()}
+				isRetrying={workPoolsQuery.isRefetching}
+			/>
+		);
+	}
+
+	// Handle loading state
+	if (workPoolsQuery.isLoading) {
+		return <WorkPoolsCardSkeleton />;
+	}
+
+	const workPools = workPoolsQuery.data ?? [];
 	const activeWorkPools = workPools.filter((workPool) => !workPool.is_paused);
 
 	const showEmptyMsg = workPools && activeWorkPools.length === 0;
@@ -75,10 +139,7 @@ export const DashboardWorkPoolsCard = ({
 
 type DashboardWorkPoolCardProps = {
 	workPool: WorkPool;
-	filter?: {
-		startDate?: string;
-		endDate?: string;
-	};
+	filter?: WorkPoolDashboardFilter;
 };
 
 const DashboardWorkPoolCard = ({
@@ -86,39 +147,25 @@ const DashboardWorkPoolCard = ({
 	filter,
 }: DashboardWorkPoolCardProps) => {
 	// Build flow runs filter for work pool statistics
-	const flowRunsFilter: FlowRunsFilter | undefined = useMemo(
-		() =>
-			filter?.startDate && filter?.endDate
-				? {
-						sort: "ID_DESC",
-						offset: 0,
-						work_pools: {
-							operator: "and_",
-							id: { any_: [workPool.id] },
-						},
-						flow_runs: {
-							operator: "and_",
-							start_time: {
-								after_: filter.startDate,
-								before_: filter.endDate,
-							},
-						},
-					}
-				: undefined,
-		[filter?.startDate, filter?.endDate, workPool.id],
-	);
+	const flowRunsFilter: FlowRunsFilter | undefined = useMemo(() => {
+		if (!filter?.startDate || !filter?.endDate) return undefined;
+
+		return {
+			sort: "ID_DESC",
+			offset: 0,
+			work_pools: {
+				operator: "and_",
+				id: { any_: [workPool.id] },
+			},
+			flow_runs: buildWorkPoolFlowRunsObj(filter),
+		};
+	}, [filter, workPool.id]);
 
 	return (
 		<div className="rounded-xl border border-border">
 			<div className="flex flex-wrap items-center gap-4 border-b border-border p-3">
 				<div className="flex flex-grow items-center gap-2">
-					<Link
-						to="/work-pools/work-pool/$workPoolName"
-						params={{ workPoolName: workPool.name }}
-						className="text-primary underline-offset-4 hover:underline"
-					>
-						{workPool.name}
-					</Link>
+					<WorkPoolIconText workPoolName={workPool.name} />
 					<WorkPoolStatusIcon status={workPool.status ?? "READY"} />
 				</div>
 				<WorkPoolMiniBarChart workPool={workPool} filter={filter} />
@@ -170,8 +217,8 @@ const DashboardWorkPoolCardDetail = ({
 	children,
 }: DashboardWorkPoolCardDetailProps) => {
 	return (
-		<div>
-			<dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+		<div className="flex flex-col items-center">
+			<dt className="text-xs text-muted-foreground">{label}</dt>
 			<dd className="mt-1">{children}</dd>
 		</div>
 	);
@@ -182,16 +229,13 @@ type WorkPoolLastPolledProps = {
 };
 
 const WorkPoolLastPolled = ({ workPool }: WorkPoolLastPolledProps) => {
+	const now = useNow({ interval: 1000 });
 	const { data: workers } = useQuery(
 		buildListWorkPoolWorkersQuery(workPool.name),
 	);
 
-	if (!workers) {
-		return <span className="text-sm text-muted-foreground">—</span>;
-	}
-
 	const lastWorkerHeartbeat =
-		workers.length > 0
+		workers && workers.length > 0
 			? max(
 					workers
 						.filter((worker) => worker.last_heartbeat_time)
@@ -203,7 +247,9 @@ const WorkPoolLastPolled = ({ workPool }: WorkPoolLastPolledProps) => {
 		return <span className="text-sm text-muted-foreground">N/A</span>;
 	}
 
-	return <FormattedDate date={lastWorkerHeartbeat} className="text-sm" />;
+	const relativeTime = formatDateTimeRelative(lastWorkerHeartbeat, now);
+
+	return <span className="text-sm">{relativeTime}</span>;
 };
 
 type WorkPoolQueueStatusArrayProps = {
@@ -219,16 +265,11 @@ const WorkPoolQueueStatusArray = ({
 		buildListWorkPoolQueuesQuery(workPool.name),
 	);
 
-	if (!workPoolQueues) {
-		return <span className="text-sm text-muted-foreground">—</span>;
-	}
+	const queues = workPoolQueues ?? [];
+	const showTooMany = queues.length > MAX_WORK_QUEUES;
+	const displayQueues = showTooMany ? queues.slice(0, MAX_WORK_QUEUES) : queues;
 
-	const showTooMany = workPoolQueues.length > MAX_WORK_QUEUES;
-	const displayQueues = showTooMany
-		? workPoolQueues.slice(0, MAX_WORK_QUEUES)
-		: workPoolQueues;
-
-	if (workPoolQueues.length === 0) {
+	if (!showTooMany && queues.length === 0) {
 		return <span className="text-sm text-muted-foreground">N/A</span>;
 	}
 
@@ -258,6 +299,31 @@ const WorkPoolFlowRunCompleteness = ({
 	workPool,
 	filter,
 }: WorkPoolFlowRunCompletenessProps) => {
+	// Calculate previous period filter by shifting the time window back
+	const previousPeriodFilter: FlowRunsFilter | null = useMemo(() => {
+		const expectedStartTime = filter?.flow_runs?.expected_start_time;
+		if (!filter || !expectedStartTime?.after_ || !expectedStartTime?.before_) {
+			return null;
+		}
+
+		const startDate = new Date(expectedStartTime.after_);
+		const endDate = new Date(expectedStartTime.before_);
+		const timeSpanInSeconds = differenceInSeconds(endDate, startDate);
+
+		return {
+			...filter,
+			sort: filter.sort ?? "ID_DESC",
+			flow_runs: {
+				...filter.flow_runs,
+				operator: filter.flow_runs?.operator ?? "and_",
+				expected_start_time: {
+					after_: subSeconds(startDate, timeSpanInSeconds).toISOString(),
+					before_: subSeconds(endDate, timeSpanInSeconds).toISOString(),
+				},
+			},
+		};
+	}, [filter]);
+
 	// Build filter for all runs (completed, failed, crashed)
 	const allRunsFilter: FlowRunsCountFilter = useMemo(
 		() => ({
@@ -302,6 +368,55 @@ const WorkPoolFlowRunCompleteness = ({
 		[filter, workPool.id],
 	);
 
+	// Build filters for previous period
+	const previousAllRunsFilter: FlowRunsCountFilter | null = useMemo(
+		() =>
+			previousPeriodFilter
+				? {
+						...previousPeriodFilter,
+						work_pools: {
+							operator: "and_",
+							id: { any_: [workPool.id] },
+						},
+						flow_runs: {
+							operator: "and_",
+							...previousPeriodFilter?.flow_runs,
+							state: {
+								operator: "and_",
+								type: {
+									any_: ["COMPLETED", "FAILED", "CRASHED"],
+								},
+							},
+						},
+					}
+				: null,
+		[previousPeriodFilter, workPool.id],
+	);
+
+	const previousCompletedRunsFilter: FlowRunsCountFilter | null = useMemo(
+		() =>
+			previousPeriodFilter
+				? {
+						...previousPeriodFilter,
+						work_pools: {
+							operator: "and_",
+							id: { any_: [workPool.id] },
+						},
+						flow_runs: {
+							operator: "and_",
+							...previousPeriodFilter?.flow_runs,
+							state: {
+								operator: "and_",
+								type: {
+									any_: ["COMPLETED"],
+								},
+							},
+						},
+					}
+				: null,
+		[previousPeriodFilter, workPool.id],
+	);
+
 	const { data: allRunsCount } = useQuery(
 		buildCountFlowRunsQuery(allRunsFilter, 30000),
 	);
@@ -310,19 +425,74 @@ const WorkPoolFlowRunCompleteness = ({
 		buildCountFlowRunsQuery(completedRunsFilter, 30000),
 	);
 
-	if (allRunsCount === undefined || completedRunsCount === undefined) {
-		return <span className="text-sm text-muted-foreground">—</span>;
-	}
+	const { data: previousAllRunsCount } = useQuery({
+		...buildCountFlowRunsQuery(previousAllRunsFilter ?? allRunsFilter, 30000),
+		enabled: previousAllRunsFilter !== null,
+	});
 
-	if (!allRunsCount || allRunsCount === 0) {
+	const { data: previousCompletedRunsCount } = useQuery({
+		...buildCountFlowRunsQuery(
+			previousCompletedRunsFilter ?? completedRunsFilter,
+			30000,
+		),
+		enabled: previousCompletedRunsFilter !== null,
+	});
+
+	if (!allRunsCount || !completedRunsCount) {
 		return <span className="text-sm text-muted-foreground">N/A</span>;
 	}
 
-	const completePercent = Math.round((completedRunsCount / allRunsCount) * 100);
+	// Calculate percentage with 2 decimal places to match Vue implementation
+	const decimal = completedRunsCount / allRunsCount;
+	const completePercent = Math.round((decimal + Number.EPSILON) * 10000) / 100;
+
+	// Calculate percent change from previous period
+	let percentChange: { change: string; direction: "+" | "-" } | null = null;
+	if (
+		previousAllRunsCount &&
+		previousAllRunsCount > 0 &&
+		previousCompletedRunsCount !== undefined
+	) {
+		const prevDecimal = previousCompletedRunsCount / previousAllRunsCount;
+		const previousCompletePercent =
+			Math.round((prevDecimal + Number.EPSILON) * 10000) / 100;
+		if (previousCompletePercent !== completePercent) {
+			const change = Math.abs(completePercent - previousCompletePercent);
+			percentChange = {
+				change: change.toFixed(1),
+				direction: completePercent > previousCompletePercent ? "+" : "-",
+			};
+		}
+	}
 
 	return (
 		<span className="inline-flex items-center gap-1">
 			<span className="text-sm">{completePercent}%</span>
+			{percentChange && (
+				<TooltipProvider>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<span
+								className={cn(
+									"cursor-help whitespace-nowrap text-xs",
+									percentChange.direction === "+"
+										? "text-sentiment-positive"
+										: "text-sentiment-negative",
+								)}
+							>
+								{percentChange.direction}
+								{percentChange.change}
+							</span>
+						</TooltipTrigger>
+						<TooltipContent>
+							<p>
+								{percentChange.direction}
+								{percentChange.change}% change over time period
+							</p>
+						</TooltipContent>
+					</Tooltip>
+				</TooltipProvider>
+			)}
 		</span>
 	);
 };
@@ -361,10 +531,6 @@ const DashboardWorkPoolLateCount = ({
 		buildCountFlowRunsQuery(lateFlowRunsFilter, 30000),
 	);
 
-	if (lateFlowRunsCount === undefined) {
-		return <span className="text-sm text-muted-foreground">—</span>;
-	}
-
 	const lateCount = lateFlowRunsCount ?? 0;
 
 	return (
@@ -381,9 +547,11 @@ type WorkPoolAverageLateTimeProps = {
 
 const WorkPoolAverageLateTime = ({
 	workPool,
+	filter,
 }: WorkPoolAverageLateTimeProps) => {
 	const flowRunsFilter: FlowRunsFilter = useMemo(
 		() => ({
+			...filter,
 			sort: "ID_DESC",
 			offset: 0,
 			work_pools: {
@@ -391,7 +559,7 @@ const WorkPoolAverageLateTime = ({
 				id: { any_: [workPool.id] },
 			},
 		}),
-		[workPool.id],
+		[filter, workPool.id],
 	);
 
 	const { data: lateness } = useQuery(
@@ -402,15 +570,10 @@ const WorkPoolAverageLateTime = ({
 		return null;
 	}
 
-	const duration = intervalToDuration({ start: 0, end: lateness * 1000 });
-	const formattedDuration = formatDuration(duration, {
-		format: ["years", "days", "hours", "minutes", "seconds"],
-		zero: false,
-		delimiter: " ",
-	});
+	const formattedDuration = secondsToApproximateString(Math.round(lateness));
 
 	return (
-		<span className="whitespace-nowrap text-xs">
+		<span className="whitespace-nowrap text-xs text-muted-foreground">
 			({formattedDuration} avg.)
 		</span>
 	);
@@ -452,9 +615,7 @@ const DashboardWorkPoolFlowRunsTotal = ({
 
 	return (
 		<div className="inline-flex items-end gap-1 text-sm">
-			<span className="font-semibold">
-				{count !== undefined ? count.toLocaleString() : "—"}
-			</span>
+			<span className="font-semibold">{(count ?? 0).toLocaleString()}</span>
 			<span className="text-muted-foreground">total</span>
 		</div>
 	);
@@ -462,10 +623,7 @@ const DashboardWorkPoolFlowRunsTotal = ({
 
 type WorkPoolMiniBarChartProps = {
 	workPool: WorkPool;
-	filter?: {
-		startDate?: string;
-		endDate?: string;
-	};
+	filter?: WorkPoolDashboardFilter;
 };
 
 const WorkPoolMiniBarChart = ({
@@ -475,28 +633,20 @@ const WorkPoolMiniBarChart = ({
 	const NUMBER_OF_BARS = 24;
 
 	// Build filter for flow runs in this work pool
-	const flowRunsBarChartFilter: FlowRunsFilter | undefined = useMemo(
-		() =>
-			filter?.startDate && filter?.endDate
-				? {
-						limit: NUMBER_OF_BARS,
-						sort: "START_TIME_DESC",
-						offset: 0,
-						work_pools: {
-							operator: "and_",
-							id: { any_: [workPool.id] },
-						},
-						flow_runs: {
-							operator: "and_",
-							start_time: {
-								after_: filter.startDate,
-								before_: filter.endDate,
-							},
-						},
-					}
-				: undefined,
-		[filter?.startDate, filter?.endDate, workPool.id],
-	);
+	const flowRunsBarChartFilter: FlowRunsFilter | undefined = useMemo(() => {
+		if (!filter?.startDate || !filter?.endDate) return undefined;
+
+		return {
+			limit: NUMBER_OF_BARS,
+			sort: "START_TIME_DESC",
+			offset: 0,
+			work_pools: {
+				operator: "and_",
+				id: { any_: [workPool.id] },
+			},
+			flow_runs: buildWorkPoolFlowRunsObj(filter),
+		};
+	}, [filter, workPool.id]);
 
 	const { data: flowRuns } = useQuery({
 		...buildFilterFlowRunsQuery(
@@ -517,7 +667,7 @@ const WorkPoolMiniBarChart = ({
 				flowRun.flow_id,
 			],
 			queryFn: async () => {
-				const queryService = getQueryService();
+				const queryService = await getQueryService();
 
 				const [deploymentRes, flowRes] = await Promise.all([
 					flowRun.deployment_id
@@ -554,20 +704,16 @@ const WorkPoolMiniBarChart = ({
 		return <div className="h-8 w-48 shrink-0" />;
 	}
 
-	// Build enriched flow runs (empty array if no flow runs)
-	const enrichedFlowRuns = (flowRuns ?? [])
-		.map((flowRun, index) => {
-			const enrichment = enrichmentQueries[index]?.data;
-			if (!enrichment?.deployment || !enrichment?.flow) {
-				return null;
-			}
-			return {
-				...flowRun,
-				deployment: enrichment.deployment,
-				flow: enrichment.flow,
-			} as FlowRunWithDeploymentAndFlow;
-		})
-		.filter((fr): fr is FlowRunWithDeploymentAndFlow => fr !== null);
+	// Build enriched flow runs with optional deployment/flow data
+	// Bars should render for all flow runs; enrichment is only used for tooltips
+	const enrichedFlowRuns = (flowRuns ?? []).map((flowRun, index) => {
+		const enrichment = enrichmentQueries[index]?.data;
+		return {
+			...flowRun,
+			deployment: enrichment?.deployment ?? undefined,
+			flow: enrichment?.flow ?? undefined,
+		};
+	});
 
 	const startDate = new Date(filter.startDate);
 	const endDate = new Date(filter.endDate);

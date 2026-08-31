@@ -15,6 +15,7 @@ from prefect.events.actions import (
     CancelFlowRun,
     ChangeFlowRunState,
     DeclareIncident,
+    DeleteFlowRun,
     DoNothing,
     PauseAutomation,
     PauseDeployment,
@@ -22,6 +23,7 @@ from prefect.events.actions import (
     PauseWorkQueue,
     ResumeAutomation,
     ResumeDeployment,
+    ResumeFlowRun,
     ResumeWorkPool,
     ResumeWorkQueue,
     RunDeployment,
@@ -80,6 +82,20 @@ EXAMPLE_TRIGGERS: List[TriggerTypes] = [
         for_each={"foo.bar.baz", "blip.bloop.blorp"},
         threshold=42,
         within=timedelta(minutes=42),
+    ),
+    EventTrigger(
+        expect={"prefect.flow-run.Completed"},
+        match={"prefect.resource.id": "prefect.flow-run.*"},
+        match_related=[
+            {
+                "prefect.resource.name": "k8s-pool",
+                "prefect.resource.role": "work-pool",
+            },
+            {
+                "prefect.resource.id": "prefect.tag.examples",
+                "prefect.resource.role": "tag",
+            },
+        ],
     ),
     CompoundTrigger(
         require="all",
@@ -200,6 +216,20 @@ EXAMPLE_DEPLOYMENT_TRIGGERS: List[DeploymentTriggerTypes] = [
         threshold=42,
         within=timedelta(minutes=42),
     ),
+    DeploymentEventTrigger(
+        expect={"prefect.flow-run.Completed"},
+        match={"prefect.resource.id": "prefect.flow-run.*"},
+        match_related=[
+            {
+                "prefect.resource.name": "k8s-pool",
+                "prefect.resource.role": "work-pool",
+            },
+            {
+                "prefect.resource.id": "prefect.tag.examples",
+                "prefect.resource.role": "tag",
+            },
+        ],
+    ),
     DeploymentCompoundTrigger(
         require="all",
         triggers=[
@@ -299,8 +329,10 @@ EXAMPLE_ACTIONS: List[ActionTypes] = [
     PauseDeployment(source="selected", deployment_id=uuid4()),
     ResumeDeployment(source="inferred"),
     ResumeDeployment(source="selected", deployment_id=uuid4()),
+    ResumeFlowRun(),
     ChangeFlowRunState(state="RUNNING", name="Runnin'", message="I'm running!"),
     CancelFlowRun(),
+    DeleteFlowRun(),
     SuspendFlowRun(),
     CallWebhook(block_document_id=uuid4(), payload="Hi there!"),
     SendNotification(block_document_id=uuid4(), subject="Hello, world!", body="Hi!"),

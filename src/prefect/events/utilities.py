@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import prefect.types._datetime
+from prefect.exceptions import EventTooLarge
 from prefect.logging.loggers import get_logger
+from prefect.settings import get_current_settings
 
 from .clients import (
     AssertingEventsClient,
@@ -15,7 +17,7 @@ from .clients import (
     PrefectEventsClient,
 )
 from .schemas.events import Event, RelatedResource
-from .worker import EventsWorker, should_emit_events
+from .worker import EventsWorker, ProcessPoolForwardingEventsClient, should_emit_events
 
 if TYPE_CHECKING:
     import logging
@@ -47,9 +49,13 @@ def emit_event(
         payload: An open-ended set of data describing what happened.
         id: The sender-provided identifier for this event. Defaults to a random
             UUID.
-        follows: The event that preceded this one. If the preceding event
-            happened more than 5 minutes prior to this event the follows
-            relationship will not be set.
+        follows: The event that preceded this one. Setting `follows`
+            establishes that this event is known to have occurred after the
+            given event, which the system can use to disambiguate the
+            ordering of the two events. Only the `id` and `occurred` of the
+            given event are used; it is not emitted again. If the preceding
+            event happened more than 5 minutes prior to this event the
+            follows relationship will not be set.
 
     Returns:
         The event that was emitted if worker is using a client that emit
@@ -64,6 +70,7 @@ def emit_event(
             AssertingEventsClient,
             PrefectCloudEventsClient,
             PrefectEventsClient,
+            ProcessPoolForwardingEventsClient,
         ]
         worker_instance = EventsWorker.instance()
 
@@ -94,9 +101,16 @@ def emit_event(
                 event_kwargs["follows"] = follows.id
 
         event_obj = Event(**event_kwargs)
+
+        max_size = get_current_settings().server.events.maximum_size_bytes
+        if event_obj.size_bytes > max_size:
+            raise EventTooLarge(event_obj.size_bytes, max_size)
+
         worker_instance.send(event_obj)
 
         return event_obj
+    except EventTooLarge:
+        raise
     except Exception:
         logger.exception(f"Error emitting event: {event}")
         return None

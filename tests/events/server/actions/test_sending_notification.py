@@ -25,6 +25,8 @@ from prefect.server.events.schemas.events import (
 )
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture
 def TestNotificationBlock(
@@ -205,6 +207,9 @@ async def test_success_event(
 ):
     action = notify_me.action
 
+    # Ignore lifecycle events emitted while creating the notification block fixtures
+    AssertingEventsClient.reset()
+
     with mock.patch.object(TestNotificationBlock, "notify"):
         await action.act(notify_me)
 
@@ -233,6 +238,7 @@ async def test_success_event(
     (triggered_event, executed_event) = AssertingEventsClient.last.events
 
     assert triggered_event.event == "prefect.automation.action.triggered"
+    assert notify_me.triggering_event is not None
     assert triggered_event.related == [
         RelatedResource.model_validate(
             {
@@ -245,6 +251,12 @@ async def test_success_event(
             {
                 "prefect.resource.id": "prefect.block-type.debug-print-notification",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{notify_me.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]
@@ -267,6 +279,12 @@ async def test_success_event(
             {
                 "prefect.resource.id": "prefect.block-type.debug-print-notification",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{notify_me.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]
@@ -298,6 +316,7 @@ async def test_captures_notification_failures(
     (triggered_event, failed_event) = AssertingEventsClient.last.events
 
     assert triggered_event.event == "prefect.automation.action.triggered"
+    assert notify_me.triggering_event is not None
     assert triggered_event.related == [
         RelatedResource.model_validate(
             {
@@ -310,6 +329,12 @@ async def test_captures_notification_failures(
             {
                 "prefect.resource.id": "prefect.block-type.debug-print-notification",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{notify_me.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]
@@ -332,6 +357,12 @@ async def test_captures_notification_failures(
             {
                 "prefect.resource.id": "prefect.block-type.debug-print-notification",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{notify_me.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]

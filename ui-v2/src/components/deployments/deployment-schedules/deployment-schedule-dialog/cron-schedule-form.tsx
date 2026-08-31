@@ -10,7 +10,7 @@ import {
 	useUpdateDeploymentSchedule,
 } from "@/api/deployments";
 import { Button } from "@/components/ui/button";
-import { CronInput } from "@/components/ui/cron-input";
+import { CronInput, divergesFromServerCron } from "@/components/ui/cron-input";
 import {
 	Dialog,
 	DialogContent,
@@ -30,12 +30,11 @@ import {
 import { Icon } from "@/components/ui/icons";
 import { Switch } from "@/components/ui/switch";
 import { TimezoneSelect } from "@/components/ui/timezone-select";
-import { Typography } from "@/components/ui/typography";
 
 const verifyCronValue = (cronValue: string) => {
 	try {
 		CronExpressionParser.parse(cronValue);
-		return true;
+		return !divergesFromServerCron(cronValue);
 	} catch {
 		return false;
 	}
@@ -45,7 +44,7 @@ const formSchema = z.object({
 	active: z.boolean(),
 	schedule: z.object({
 		cron: z.string().refine(verifyCronValue),
-		timezone: z.string().default("Etc/UTC"),
+		timezone: z.string().default("UTC"),
 		day_or: z.boolean().default(true),
 	}),
 });
@@ -55,7 +54,7 @@ const DEFAULT_VALUES = {
 	active: true,
 	schedule: {
 		cron: "* * * * *",
-		timezone: "Etc/UTC",
+		timezone: "UTC",
 		day_or: true,
 	},
 } satisfies FormSchema;
@@ -94,7 +93,7 @@ export const CronScheduleForm = ({
 					schedule: {
 						cron,
 						day_or,
-						timezone: timezone ?? "Etc/UTC",
+						timezone: timezone ?? "UTC",
 					},
 				});
 			}
@@ -249,19 +248,24 @@ const DayOrDialog = () => {
 	return (
 		<Dialog>
 			<DialogTrigger asChild>
-				<button type="button" className="cursor-help">
-					<Icon id="Info" className="size-4 inline" />
-				</button>
+				<Button
+					type="button"
+					variant="ghost"
+					size="icon"
+					className="size-5 cursor-help"
+				>
+					<Icon id="Info" className="size-3.5" />
+				</Button>
 			</DialogTrigger>
 			<DialogContent aria-describedby={undefined}>
 				<DialogHeader>
 					<DialogTitle>Day Or</DialogTitle>
 				</DialogHeader>
-				<Typography>
+				<p className="text-base">
 					When the &quot;Day Or&quot; value is off, this schedule will connect
 					day of the month and day of the week entries using OR logic; when on
 					it will connect them using AND logic.
-				</Typography>
+				</p>
 			</DialogContent>
 		</Dialog>
 	);

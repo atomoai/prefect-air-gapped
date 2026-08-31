@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import enum
+import inspect
 import json
 import logging
 import uuid
@@ -15,6 +16,8 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncGenerator,
+    Awaitable,
+    Callable,
     Literal,
     NamedTuple,
     Protocol,
@@ -26,19 +29,22 @@ import aiobotocore.session
 import anyio
 from botocore.exceptions import ClientError
 from cachetools import LRUCache
+from prefect_aws.observers.diagnostics import diagnose_ecs_task
 from prefect_aws.settings import EcsObserverSettings
 from slugify import slugify
 
 import prefect
 from prefect.events.clients import get_events_client
 from prefect.events.schemas.events import Event, RelatedResource, Resource
-from prefect.exceptions import ObjectNotFound
-from prefect.states import Crashed
+from prefect.exceptions import Abort, ObjectNotFound
+from prefect.logging.loggers import flow_run_logger
+from prefect.states import Crashed, InfrastructurePending
 from prefect.utilities.engine import propose_state
 
 if TYPE_CHECKING:
     from mypy_boto3_sqs.type_defs import MessageTypeDef
     from types_aiobotocore_ecs import ECSClient
+    from types_aiobotocore_logs import CloudWatchLogsClient
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -47,6 +53,7 @@ logger.setLevel(logging.INFO)
 _last_event_cache: LRUCache[uuid.UUID, Event] = LRUCache(maxsize=1000)
 
 _ECS_DEFAULT_CONTAINER_NAME = "prefect"
+_SKIP_FORWARDING = object()
 
 _ECS_EVENT_DETAIL_MAP: dict[
     str, Literal["task", "container-instance", "deployment"]
@@ -182,9 +189,64 @@ SQS_MEMORY = 10
 SQS_CONSECUTIVE_FAILURES = 3
 SQS_BACKOFF = 1
 SQS_MAX_BACKOFF_ATTEMPTS = 5
+SQS_MESSAGE_VISIBILITY_TIMEOUT_SECONDS = 300
+SQS_VISIBILITY_EXTENSION_INTERVAL_SECONDS = 240
+SQS_VISIBILITY_EXTENSION_RETRY_INTERVAL_SECONDS = 5
 
 OBSERVER_RESTART_BASE_DELAY = 30
 OBSERVER_MAX_RESTART_ATTEMPTS = 5
+
+
+class SqsMessage(NamedTuple):
+    message: "MessageTypeDef"
+    ack: Callable[[], Awaitable[bool]]
+    extend_visibility: Callable[[], Awaitable[bool]]
+
+
+class _SqsBackoffState:
+    def __init__(self, operation: str):
+        self.operation = operation
+        self.track_record: deque[bool] = deque(
+            [True] * SQS_CONSECUTIVE_FAILURES, maxlen=SQS_CONSECUTIVE_FAILURES
+        )
+        self.failures: deque[tuple[Exception, TracebackType | None]] = deque(
+            maxlen=SQS_MEMORY
+        )
+        self.backoff_count = 0
+
+    async def record_failure(self, e: Exception) -> None:
+        self.track_record.append(False)
+        self.failures.append((e, e.__traceback__))
+        logger.debug("Failed to %s messages from SQS", self.operation, exc_info=e)
+
+        if not any(self.track_record):
+            self.backoff_count += 1
+
+            if self.backoff_count > SQS_MAX_BACKOFF_ATTEMPTS:
+                logger.error(
+                    "SQS polling exceeded maximum backoff attempts (%s). "
+                    "Last %s errors: %s",
+                    SQS_MAX_BACKOFF_ATTEMPTS,
+                    len(self.failures),
+                    [str(e) for e, _ in self.failures],
+                )
+                raise RuntimeError(
+                    f"SQS polling failed after {SQS_MAX_BACKOFF_ATTEMPTS} backoff attempts"
+                ) from e
+
+            self.track_record.extend([True] * SQS_CONSECUTIVE_FAILURES)
+            self.failures.clear()
+            backoff_seconds = SQS_BACKOFF * 2**self.backoff_count
+            logger.debug(
+                "Backing off due to consecutive errors, using increased interval of %s seconds.",
+                backoff_seconds,
+            )
+            await asyncio.sleep(backoff_seconds)
+
+    def record_success(self) -> None:
+        self.backoff_count = 0
+        self.track_record.append(True)
+        self.failures.clear()
 
 
 class SqsSubscriber:
@@ -194,7 +256,7 @@ class SqsSubscriber:
 
     async def stream_messages(
         self,
-    ) -> AsyncGenerator["MessageTypeDef", None]:
+    ) -> AsyncGenerator[SqsMessage, None]:
         session = aiobotocore.session.get_session()
         async with session.create_client(
             "sqs", region_name=self.queue_region
@@ -224,61 +286,62 @@ class SqsSubscriber:
                     return
                 raise
 
-            track_record: deque[bool] = deque(
-                [True] * SQS_CONSECUTIVE_FAILURES, maxlen=SQS_CONSECUTIVE_FAILURES
-            )
-            failures: deque[tuple[Exception, TracebackType | None]] = deque(
-                maxlen=SQS_MEMORY
-            )
-            backoff_count = 0
+            receive_backoff = _SqsBackoffState("receive")
+            delete_backoff = _SqsBackoffState("delete")
+            visibility_backoff = _SqsBackoffState("change visibility for")
 
             while True:
                 try:
                     messages = await sqs_client.receive_message(
                         QueueUrl=queue_url,
-                        MaxNumberOfMessages=10,
+                        MaxNumberOfMessages=1,
                         WaitTimeSeconds=20,
+                        VisibilityTimeout=SQS_MESSAGE_VISIBILITY_TIMEOUT_SECONDS,
                     )
-                    for message in messages.get("Messages", []):
-                        if not (receipt_handle := message.get("ReceiptHandle")):
-                            continue
-
-                        yield message
-
-                        await sqs_client.delete_message(
-                            QueueUrl=queue_url,
-                            ReceiptHandle=receipt_handle,
-                        )
-
-                    backoff_count = 0
                 except Exception as e:
-                    track_record.append(False)
-                    failures.append((e, e.__traceback__))
-                    logger.debug("Failed to receive messages from SQS", exc_info=e)
+                    await receive_backoff.record_failure(e)
+                    continue
 
-                if not any(track_record):
-                    backoff_count += 1
+                receive_backoff.record_success()
 
-                    if backoff_count > SQS_MAX_BACKOFF_ATTEMPTS:
-                        logger.error(
-                            "SQS polling exceeded maximum backoff attempts (%s). "
-                            "Last %s errors: %s",
-                            SQS_MAX_BACKOFF_ATTEMPTS,
-                            len(failures),
-                            [str(e) for e, _ in failures],
-                        )
-                        raise RuntimeError(
-                            f"SQS polling failed after {SQS_MAX_BACKOFF_ATTEMPTS} backoff attempts"
-                        )
+                for message in messages.get("Messages", []):
+                    if not (receipt_handle := message.get("ReceiptHandle")):
+                        continue
 
-                    track_record.extend([True] * SQS_CONSECUTIVE_FAILURES)
-                    failures.clear()
-                    backoff_seconds = SQS_BACKOFF * 2**backoff_count
-                    logger.debug(
-                        "Backing off due to consecutive errors, using increased interval of %s seconds.",
-                        backoff_seconds,
+                    async def ack(receipt_handle: str = receipt_handle) -> bool:
+                        try:
+                            await sqs_client.delete_message(
+                                QueueUrl=queue_url,
+                                ReceiptHandle=receipt_handle,
+                            )
+                        except Exception as e:
+                            await delete_backoff.record_failure(e)
+                            return False
+                        else:
+                            delete_backoff.record_success()
+                            return True
+
+                    async def extend_visibility(
+                        receipt_handle: str = receipt_handle,
+                    ) -> bool:
+                        try:
+                            await sqs_client.change_message_visibility(
+                                QueueUrl=queue_url,
+                                ReceiptHandle=receipt_handle,
+                                VisibilityTimeout=SQS_MESSAGE_VISIBILITY_TIMEOUT_SECONDS,
+                            )
+                        except Exception as e:
+                            await visibility_backoff.record_failure(e)
+                            return False
+                        else:
+                            visibility_backoff.record_success()
+                            return True
+
+                    yield SqsMessage(
+                        message=message,
+                        ack=ack,
+                        extend_visibility=extend_visibility,
                     )
-                    await asyncio.sleep(backoff_seconds)
 
 
 class EcsObserver:
@@ -306,15 +369,16 @@ class EcsObserver:
 
     async def run(self):
         async with AsyncExitStack() as stack:
-            task_group = await stack.enter_async_context(anyio.create_task_group())
             await stack.enter_async_context(self.ecs_tags_reader)
 
-            async for message in self.sqs_subscriber.stream_messages():
+            async for sqs_message in self.sqs_subscriber.stream_messages():
+                message = sqs_message.message
                 if not (body := message.get("Body")):
                     logger.debug(
                         "No body in message. Skipping.",
                         extra={"sqs_message": message},
                     )
+                    await sqs_message.ack()
                     continue
 
                 body = json.loads(body)
@@ -333,14 +397,19 @@ class EcsObserver:
                         "No event type in message. Skipping.",
                         extra={"sqs_message": message},
                     )
+                    await sqs_message.ack()
                     continue
 
                 if detail_type not in _ECS_EVENT_DETAIL_MAP:
                     logger.debug("Unknown event type: %s. Skipping.", detail_type)
+                    await sqs_message.ack()
                     continue
 
                 last_status = body.get("detail", {}).get("lastStatus")
                 event_type = _ECS_EVENT_DETAIL_MAP[detail_type]
+                matching_handlers: list[
+                    Union[EcsEventHandler, AsyncEcsEventHandler]
+                ] = []
                 for handler, filters in self.event_handlers[event_type]:
                     if filters["tags"].is_match(tags) and filters[
                         "last_status"
@@ -350,12 +419,68 @@ class EcsObserver:
                             handler.__name__,
                             extra={"sqs_message": message},
                         )
-                        if asyncio.iscoroutinefunction(handler):
-                            task_group.start_soon(handler, body, tags)
-                        else:
-                            task_group.start_soon(
-                                asyncio.to_thread, partial(handler, body, tags)
+                        matching_handlers.append(handler)
+
+                if matching_handlers:
+                    try:
+                        async with anyio.create_task_group() as visibility_group:
+                            visibility_group.start_soon(
+                                self._extend_message_visibility_while_processing,
+                                sqs_message,
+                                message,
                             )
+                            try:
+                                async with anyio.create_task_group() as task_group:
+                                    for handler in matching_handlers:
+                                        task_group.start_soon(
+                                            self._run_handler, handler, body, tags
+                                        )
+                            finally:
+                                visibility_group.cancel_scope.cancel()
+                    except Exception:
+                        logger.exception(
+                            "Failed to process ECS observer message",
+                            extra={"sqs_message": message},
+                        )
+                        continue
+
+                await sqs_message.ack()
+
+    async def _run_handler(
+        self,
+        handler: Union[EcsEventHandler, AsyncEcsEventHandler],
+        event: dict[str, Any],
+        tags: dict[str, str],
+    ) -> None:
+        if inspect.iscoroutinefunction(handler):
+            await handler(event, tags)
+        else:
+            await asyncio.to_thread(partial(handler, event, tags))
+
+    async def _extend_message_visibility_while_processing(
+        self,
+        sqs_message: SqsMessage,
+        message: "MessageTypeDef",
+    ) -> None:
+        sleep_interval = SQS_VISIBILITY_EXTENSION_INTERVAL_SECONDS
+        while True:
+            await asyncio.sleep(sleep_interval)
+            try:
+                extended = await sqs_message.extend_visibility()
+            except RuntimeError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to extend ECS observer message visibility",
+                    extra={"sqs_message": message},
+                )
+                sleep_interval = SQS_VISIBILITY_EXTENSION_RETRY_INTERVAL_SECONDS
+            else:
+                sleep_interval = (
+                    SQS_VISIBILITY_EXTENSION_INTERVAL_SECONDS
+                    if extended
+                    else SQS_VISIBILITY_EXTENSION_RETRY_INTERVAL_SECONDS
+                )
 
     def on_event(
         self,
@@ -437,6 +562,155 @@ def _related_resources_from_tags(tags: dict[str, str]) -> list[RelatedResource]:
     return related
 
 
+def _region_from_arn(arn: str) -> str | None:
+    """Extract the AWS region from an ARN (e.g. arn:aws:ecs:us-east-1:...)."""
+    parts = arn.split(":")
+    if len(parts) >= 4 and parts[3]:
+        return parts[3]
+    return None
+
+
+async def _forward_cloudwatch_logs(
+    *,
+    task_arn: str,
+    event_detail: dict[str, Any],
+    flow_run_id: str,
+    container_name: str | None,
+    max_events: int,
+    handler_logger: logging.Logger,
+) -> None:
+    """Fetch CloudWatch logs for a crashed ECS task and forward them to the flow run.
+
+    Args:
+        container_name: The orchestration container name from the event. When
+            `None` (e.g. TaskFailedToStart with no containers), the name is
+            resolved from the task definition's containerDefinitions.
+    """
+    task_id = task_arn.split("/")[-1]
+    task_region = _region_from_arn(task_arn)
+
+    log_group: str | None = None
+    stream_prefix: str | None = None
+    region: str | None = None
+
+    # Read logConfiguration from the task definition's containerDefinitions.
+    # The ECS DescribeTasks API does not include logConfiguration.
+    #
+    # describe_task_definition works on INACTIVE (deregistered) task
+    # definitions, so this is safe even when auto_deregister_task_definition
+    # is enabled and the deregister_task_definition handler runs concurrently.
+    task_definition_arn = event_detail.get("taskDefinitionArn")
+    if task_definition_arn:
+        td_region = _region_from_arn(task_definition_arn) or task_region
+        try:
+            async with aiobotocore.session.get_session().create_client(
+                "ecs", region_name=td_region
+            ) as ecs_client:
+                td_response = await ecs_client.describe_task_definition(
+                    taskDefinition=task_definition_arn,
+                )
+
+            container_defs = td_response.get("taskDefinition", {}).get(
+                "containerDefinitions", []
+            )
+
+            # When container_name is known (from the event's runtime
+            # containers), look up that specific definition. When unknown
+            # (TaskFailedToStart with no containers), find the definition
+            # that matches the default Prefect container name, or use the
+            # sole definition if there is exactly one.
+            if container_name is not None:
+                container_def = next(
+                    (c for c in container_defs if c.get("name") == container_name),
+                    None,
+                )
+            else:
+                container_def = next(
+                    (
+                        c
+                        for c in container_defs
+                        if c.get("name") == _ECS_DEFAULT_CONTAINER_NAME
+                    ),
+                    container_defs[0] if len(container_defs) == 1 else None,
+                )
+                if container_def:
+                    container_name = container_def.get(
+                        "name", _ECS_DEFAULT_CONTAINER_NAME
+                    )
+
+            if container_def:
+                log_config = container_def.get("logConfiguration", {})
+                if log_config.get("logDriver") == "awslogs":
+                    options = log_config.get("options", {})
+                    log_group = options.get("awslogs-group")
+                    stream_prefix = options.get("awslogs-stream-prefix")
+                    region = options.get("awslogs-region")
+        except Exception:
+            handler_logger.debug(
+                "Failed to describe task definition %s for log forwarding",
+                task_definition_arn,
+                exc_info=True,
+            )
+
+    if not log_group or not stream_prefix or not container_name:
+        return
+
+    log_stream = f"{stream_prefix}/{container_name}/{task_id}"
+
+    try:
+        async with aiobotocore.session.get_session().create_client(
+            "logs", region_name=region or task_region
+        ) as logs_client:
+            log_lines = await fetch_cloudwatch_logs(
+                logs_client=logs_client,
+                log_group=log_group,
+                log_stream=log_stream,
+                max_events=max_events,
+            )
+    except Exception:
+        handler_logger.debug(
+            "Failed to fetch CloudWatch logs for task %s", task_arn, exc_info=True
+        )
+        return
+
+    if log_lines:
+        run_logger = flow_run_logger(flow_run_id=uuid.UUID(flow_run_id)).getChild(
+            "observer"
+        )
+        for line in log_lines:
+            run_logger.info(line)
+
+
+async def fetch_cloudwatch_logs(
+    *,
+    logs_client: "CloudWatchLogsClient",
+    log_group: str,
+    log_stream: str,
+    max_events: int,
+) -> list[str]:
+    """Fetch the most recent log messages from a CloudWatch log stream.
+
+    Uses startFromHead=False to read from the tail of the stream so the
+    crash traceback / final error output is captured even when the task
+    produced more than `max_events` lines.
+
+    Returns an empty list if the log group or stream does not exist.
+    """
+    try:
+        response = await logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=log_stream,
+            limit=max_events,
+            startFromHead=False,
+        )
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return []
+        raise
+
+    return [event["message"] for event in response.get("events", [])]
+
+
 ecs_observer = EcsObserver()
 
 
@@ -509,6 +783,39 @@ async def replicate_ecs_event(event: dict[str, Any], tags: dict[str, str]):
         except Exception:
             handler_logger.exception("Error emitting event %s", event_id)
 
+    if last_status in ("PENDING", "PROVISIONING"):
+        flow_run_id = tags.get("prefect.io/flow-run-id")
+        if flow_run_id:
+            try:
+                async with prefect.get_client() as client:
+                    flow_run = await client.read_flow_run(
+                        flow_run_id=uuid.UUID(flow_run_id)
+                    )
+
+                    if flow_run.state is not None and (
+                        flow_run.state.is_running()
+                        or flow_run.state.is_final()
+                        or flow_run.state.is_paused()
+                    ):
+                        return
+
+                    await propose_state(
+                        client=client,
+                        state=InfrastructurePending(
+                            message=f"ECS task is {last_status.lower()}."
+                        ),
+                        flow_run_id=uuid.UUID(flow_run_id),
+                    )
+            except (Abort, ObjectNotFound):
+                handler_logger.debug(
+                    "State proposal skipped for flow run %s", flow_run_id
+                )
+            except Exception:
+                handler_logger.exception(
+                    "Failed to propose InfrastructurePending for flow run %s",
+                    flow_run_id,
+                )
+
 
 @ecs_observer.on_event(
     "task", tags={"prefect.io/flow-run-id": FilterCase.PRESENT}, statuses=["STOPPED"]
@@ -534,37 +841,158 @@ async def mark_runs_as_crashed(event: dict[str, Any], tags: dict[str, str]):
 
         assert flow_run.state is not None, "Expected flow run state to be set"
 
-        # Exit early for final or scheduled states
-        if flow_run.state.is_final() or flow_run.state.is_scheduled():
+        # Exit early for final, scheduled, or paused states
+        if (
+            flow_run.state.is_final()
+            or flow_run.state.is_scheduled()
+            or flow_run.state.is_paused()
+        ):
             logger.debug(
-                f"Flow run {flow_run_id} is in final or scheduled state, skipping"
+                f"Flow run {flow_run_id} is in final, scheduled, or paused state, skipping"
             )
             return
 
         containers = event.get("detail", {}).get("containers", [])
 
+        orchestration_container = next(
+            (
+                container
+                for container in containers
+                if container.get("name") == _ECS_DEFAULT_CONTAINER_NAME
+            ),
+            None,
+        )
+
+        if orchestration_container is not None:
+            containers_to_check = [orchestration_container]
+        else:
+            containers_to_check = containers
+
         containers_with_non_zero_exit_codes = [
             container
-            for container in containers
+            for container in containers_to_check
             if container.get("exitCode") is None or container.get("exitCode") != 0
         ]
 
-        if any(containers_with_non_zero_exit_codes):
-            container_identifiers = [
-                c.get("name") or c.get("containerArn") for c in containers
-            ]
-            handler_logger.info(
-                "The following containers stopped with a non-zero exit code: %s. Marking flow run %s as crashed",
-                container_identifiers,
-                flow_run_id,
-            )
-            await propose_state(
-                client=orchestration_client,
-                state=Crashed(
-                    message=f"The following containers stopped with a non-zero exit code: {container_identifiers}"
-                ),
-                flow_run_id=uuid.UUID(flow_run_id),
-            )
+        # Run diagnosis when the orchestration container failed or when there
+        # are no containers at all (e.g. TaskFailedToStart).  Skip when only
+        # sidecars failed — those are non-fatal and should not produce logs.
+        should_diagnose = bool(containers_with_non_zero_exit_codes) or not containers
+
+        if should_diagnose:
+            diagnosis = diagnose_ecs_task(event.get("detail", {}))
+            if diagnosis:
+                run_logger = flow_run_logger(
+                    flow_run_id=uuid.UUID(flow_run_id)
+                ).getChild("observer")
+                run_logger.log(
+                    diagnosis.level,
+                    "%s: %s Resolution: %s",
+                    diagnosis.summary,
+                    diagnosis.detail,
+                    diagnosis.resolution,
+                )
+
+        crash_proposal_rejected = False
+        # Propose Crashed when containers exited non-zero, OR when ECS
+        # stopped the task before any container could start (e.g.,
+        # TaskFailedToStart with an empty containers array).
+        task_failed_to_start = (
+            not containers
+            and event.get("detail", {}).get("stopCode") == "TaskFailedToStart"
+        )
+        should_crash = (
+            bool(any(containers_with_non_zero_exit_codes)) or task_failed_to_start
+        )
+
+        if should_crash:
+            if task_failed_to_start:
+                stop_reason = event.get("detail", {}).get(
+                    "stoppedReason", "unknown reason"
+                )
+                crash_message = (
+                    f"ECS task failed to start: {stop_reason}. "
+                    f"The capacity provider could not place the task."
+                )
+                handler_logger.info(
+                    "Task %s failed to start (%s). Marking flow run %s as crashed",
+                    task_arn,
+                    stop_reason,
+                    flow_run_id,
+                )
+            else:
+                container_identifiers = [
+                    c.get("name") or c.get("containerArn")
+                    for c in containers_with_non_zero_exit_codes
+                ]
+                crash_message = (
+                    f"The following containers stopped with a non-zero "
+                    f"exit code: {container_identifiers}"
+                )
+                handler_logger.info(
+                    "The following containers stopped with a non-zero exit code: %s. Marking flow run %s as crashed",
+                    container_identifiers,
+                    flow_run_id,
+                )
+
+            try:
+                await propose_state(
+                    client=orchestration_client,
+                    state=Crashed(message=crash_message),
+                    flow_run_id=uuid.UUID(flow_run_id),
+                )
+            except Abort:
+                crash_proposal_rejected = True
+                handler_logger.debug(
+                    "State proposal aborted for flow run %s", flow_run_id
+                )
+            except Exception:
+                handler_logger.exception(
+                    "Failed to propose Crashed state for flow run %s",
+                    flow_run_id,
+                )
+                raise
+
+        # Forward CloudWatch container logs for runs that never connected
+        # to the Prefect server (never reached Running state). This runs
+        # after the crash state proposal so that the run is promptly marked
+        # as crashed regardless of CloudWatch API latency. Skip if the
+        # crash proposal was rejected — the run likely advanced past the
+        # crash and forwarding logs would be misleading.
+        if (
+            should_diagnose
+            and not flow_run.state.is_running()
+            and not crash_proposal_rejected
+        ):
+            observer_settings = ecs_observer.settings
+            if observer_settings.forward_crashed_run_logs:
+                # Determine which container's logs to forward.
+                if orchestration_container is not None:
+                    orch_container_name = orchestration_container.get("name")
+                elif not containers:
+                    # TaskFailedToStart — no containers at all. Pass None
+                    # so _forward_cloudwatch_logs resolves the container
+                    # name from the task definition (supports custom names).
+                    orch_container_name = None
+                elif len(containers) == 1:
+                    # Single container with a non-default name — this is
+                    # unambiguously the orchestration container (custom
+                    # container_name in the work pool config).
+                    orch_container_name = containers[0].get("name")
+                else:
+                    # Multiple containers but none matched the default
+                    # name — can't distinguish orchestration from sidecars.
+                    orch_container_name = _SKIP_FORWARDING
+
+                if orch_container_name is not _SKIP_FORWARDING:
+                    await _forward_cloudwatch_logs(
+                        task_arn=task_arn,
+                        event_detail=event.get("detail", {}),
+                        flow_run_id=flow_run_id,
+                        container_name=orch_container_name,
+                        max_events=observer_settings.forward_crashed_run_logs_max_events,
+                        handler_logger=handler_logger,
+                    )
 
 
 @ecs_observer.on_event(

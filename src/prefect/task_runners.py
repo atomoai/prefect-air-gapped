@@ -10,6 +10,7 @@ import threading
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from contextvars import copy_context
+from functools import partial
 from types import CoroutineType
 from typing import (
     TYPE_CHECKING,
@@ -17,13 +18,17 @@ from typing import (
     Callable,
     Generic,
     Iterable,
+    Protocol,
     overload,
 )
 
 from typing_extensions import ParamSpec, Self, TypeVar
 
+from prefect._flow_run_suspension import raise_if_flow_run_suspension_requested
 from prefect._internal.uuid7 import uuid7
 from prefect.client.schemas.objects import RunInput
+from prefect.events.schemas.events import Event
+from prefect.events.worker import EventsWorker, ProcessPoolForwardingEventsClient
 from prefect.exceptions import MappingLengthMismatch, MappingMissingIterable
 from prefect.futures import (
     PrefectConcurrentFuture,
@@ -32,9 +37,10 @@ from prefect.futures import (
     PrefectFutureList,
     wait,
 )
+from prefect.logging.handlers import APILogWorker, set_api_log_sink
 from prefect.logging.loggers import get_logger, get_run_logger
 from prefect.settings.context import get_current_settings
-from prefect.utilities.annotations import allow_failure, quote, unmapped
+from prefect.utilities.annotations import allow_failure, opaque, quote, unmapped
 from prefect.utilities.callables import (
     cloudpickle_wrapped_call,
     collapse_variadic_parameters,
@@ -156,7 +162,7 @@ class TaskRunner(abc.ABC, Generic[F]):
         static_parameters: dict[str, Any] = {}
         annotated_parameters: dict[str, Any] = {}
         for key, val in parameters.items():
-            if isinstance(val, (allow_failure, quote)):
+            if isinstance(val, (allow_failure, opaque, quote)):
                 # Unwrap annotated parameters to determine if they are iterable
                 annotated_parameters[key] = val
                 val = val.unwrap()
@@ -188,6 +194,8 @@ class TaskRunner(abc.ABC, Generic[F]):
 
         futures: list[PrefectFuture[Any]] = []
         for i in range(map_length):
+            raise_if_flow_run_suspension_requested()
+
             call_parameters: dict[str, Any] = {
                 key: value[i] for key, value in iterable_parameters.items()
             }
@@ -237,7 +245,7 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
 
     Attributes:
         max_workers: The maximum number of threads to use for executing tasks.
-            Defaults to `PREFECT_TASK_RUNNER_THREAD_POOL_MAX_WORKERS` or `sys.maxsize`.
+            Defaults to `PREFECT_TASKS_RUNNER_THREAD_POOL_MAX_WORKERS` or `sys.maxsize`.
 
     Note:
         This runner uses `contextvars.copy_context()` for thread-safe context propagation.
@@ -293,7 +301,7 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
 
         ```python
         # Set via environment variable
-        # export PREFECT_TASK_RUNNER_THREAD_POOL_MAX_WORKERS=8
+        # export PREFECT_TASKS_RUNNER_THREAD_POOL_MAX_WORKERS=8
 
         from prefect import flow
         from prefect.task_runners import ThreadPoolTaskRunner
@@ -315,6 +323,17 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
             else max_workers
         )
         self._cancel_events: dict[uuid.UUID, threading.Event] = {}
+        # Tracks the thread idents owned by `self._executor` so we can detect
+        # nested `submit` calls coming from one of our own worker threads.
+        self._worker_thread_ids: set[int] = set()
+        # Counts in-flight submissions (incremented after `_executor.submit`
+        # and decremented in the underlying future's done callback). Used to
+        # gauge pool saturation when warning about nested-submission deadlocks.
+        # Stored as a plain int rather than a set of futures so we never
+        # retain references to futures past their natural lifetime.
+        self._active_submission_count = 0
+        self._submission_lock = threading.Lock()
+        self._nested_submit_warning_emitted = False
 
     def duplicate(self) -> "ThreadPoolTaskRunner[R]":
         return type(self)(max_workers=self._max_workers)
@@ -362,8 +381,10 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
         if wait_for and task.tags and (self._max_workers <= len(task.tags)):
             self.logger.warning(
                 f"Task {task.name} has {len(task.tags)} tags but only {self._max_workers} workers available"
-                "This may lead to dead-locks. Consider increasing the value of `PREFECT_TASK_RUNNER_THREAD_POOL_MAX_WORKERS` or `max_workers`."
+                "This may lead to dead-locks. Consider increasing the value of `PREFECT_TASKS_RUNNER_THREAD_POOL_MAX_WORKERS` or `max_workers`."
             )
+
+        self._warn_if_nested_submit_would_deadlock(task)
 
         from prefect.context import FlowRunContext
         from prefect.task_engine import run_task_async, run_task_sync
@@ -405,10 +426,58 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
                 run_task_sync,
                 **submit_kwargs,
             )
+        with self._submission_lock:
+            self._active_submission_count += 1
+        future.add_done_callback(self._on_executor_future_done)
+
         prefect_future = PrefectConcurrentFuture(
             task_run_id=task_run_id, wrapped_future=future
         )
         return prefect_future
+
+    def _register_worker_thread(self) -> None:
+        """`ThreadPoolExecutor` `initializer` hook recording each worker thread's ident."""
+        with self._submission_lock:
+            self._worker_thread_ids.add(threading.get_ident())
+
+    def _on_executor_future_done(self, future: concurrent.futures.Future[Any]) -> None:
+        with self._submission_lock:
+            if self._active_submission_count > 0:
+                self._active_submission_count -= 1
+
+    def _warn_if_nested_submit_would_deadlock(self, task: "Task[Any, Any]") -> None:
+        """Warn when a `submit` from one of our worker threads would deadlock.
+
+        With a bounded `max_workers`, a parent task that submits child tasks
+        and then synchronously waits on their futures can exhaust the shared
+        executor: every worker thread is held by a parent blocked on
+        `.result()` while the children remain queued. Issue #17060 tracks
+        this footgun.
+
+        We emit a single, actionable warning per runner instance the first
+        time we detect that condition.
+        """
+        if self._nested_submit_warning_emitted:
+            return
+        if self._max_workers >= sys.maxsize:
+            return
+        with self._submission_lock:
+            in_worker = threading.get_ident() in self._worker_thread_ids
+            saturated = self._active_submission_count >= self._max_workers
+            if not (in_worker and saturated):
+                return
+            self._nested_submit_warning_emitted = True
+        self.logger.warning(
+            f"Submitting task {task.name!r} from within another task on this "
+            f"ThreadPoolTaskRunner while all {self._max_workers} worker threads "
+            "are busy. If the parent task blocks on the child's result this will "
+            "deadlock, because no worker is free to run the child. Increase "
+            "`max_workers` (or `PREFECT_TASKS_RUNNER_THREAD_POOL_MAX_WORKERS`) "
+            "above the deepest synchronous nesting level, restructure the flow "
+            "to submit children at the flow level, or run the children via "
+            "`.delay()` against a task worker. See "
+            "https://github.com/PrefectHQ/prefect/issues/17060 for details."
+        )
 
     @overload
     def map(
@@ -445,7 +514,13 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
 
     def __enter__(self) -> Self:
         super().__enter__()
-        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._worker_thread_ids = set()
+        self._active_submission_count = 0
+        self._nested_submit_warning_emitted = False
+        self._executor = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            initializer=self._register_worker_thread,
+        )
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
@@ -460,9 +535,68 @@ class ThreadPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[R]]):
             return False
         return self._max_workers == value._max_workers
 
+    def __getstate__(self) -> dict[str, Any]:
+        # `threading.Lock` is not picklable, but `ThreadPoolTaskRunner`
+        # instances are cloudpickled when a flow run is dispatched to a
+        # subprocess. Drop the lock here and rebuild it on unpickle.
+        state = self.__dict__.copy()
+        state.pop("_submission_lock", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._submission_lock = threading.Lock()
+
 
 # Here, we alias ConcurrentTaskRunner to ThreadPoolTaskRunner for backwards compatibility
 ConcurrentTaskRunner = ThreadPoolTaskRunner
+
+_PROCESS_POOL_MESSAGE_TYPE_EVENT = "event"
+_PROCESS_POOL_MESSAGE_TYPE_LOG = "log"
+_PROCESS_POOL_MESSAGE_QUEUE_SHUTDOWN = "__prefect_process_pool_message_queue_shutdown__"
+
+_SubprocessMessageProcessorResult = tuple[str, Any] | None
+
+
+class _SubprocessMessageProcessor(Protocol):
+    def __call__(
+        self, message_type: str, message_payload: Any
+    ) -> _SubprocessMessageProcessorResult: ...
+
+
+class _SubprocessMessageProcessorFactory(Protocol):
+    def __call__(self) -> _SubprocessMessageProcessor: ...
+
+
+def _enqueue_process_pool_log(message_queue: Any, log_payload: dict[str, Any]) -> None:
+    message_queue.put((_PROCESS_POOL_MESSAGE_TYPE_LOG, log_payload))
+
+
+def _initialize_process_pool_worker(
+    message_queue: Any | None = None,
+    initializer: Callable[..., None] | None = None,
+    initargs: tuple[Any, ...] = (),
+) -> None:
+    """
+    Configure process-pool workers to forward emitted events and API logs back to
+    the parent process.
+
+    If a user `initializer` is provided, it runs after Prefect's own setup so that
+    it can rely on event/log forwarding already being in place.
+    """
+    if message_queue is None:
+        EventsWorker.set_client_override(None)
+        set_api_log_sink(None)
+    else:
+        EventsWorker.set_client_override(
+            ProcessPoolForwardingEventsClient,
+            event_queue=message_queue,
+            item_type=_PROCESS_POOL_MESSAGE_TYPE_EVENT,
+        )
+        set_api_log_sink(partial(_enqueue_process_pool_log, message_queue))
+
+    if initializer is not None:
+        initializer(*initargs)
 
 
 def _run_task_in_subprocess(
@@ -492,9 +626,35 @@ def _run_task_in_subprocess(
                 import asyncio
 
                 maybe_coro = run_task_async(*args, **kwargs)
-                return asyncio.run(maybe_coro)
+                result = asyncio.run(maybe_coro)
             else:
-                return run_task_sync(*args, **kwargs)
+                result = run_task_sync(*args, **kwargs)
+
+            # Flush the subprocess's EventsWorker so that any events emitted
+            # during the task are forwarded to the parent process's
+            # multiprocessing queue before this function returns.  Without
+            # this, the process pool may shut down the worker before the
+            # async EventsWorker processing completes, causing events to be
+            # silently lost.
+            #
+            # Only flush when a worker already exists (i.e. events were
+            # actually emitted) to avoid instantiating a new EventsWorker
+            # and its associated orchestration client for tasks that never
+            # emit events.
+            with EventsWorker._instance_lock:
+                has_events_worker = bool(EventsWorker._instances)
+            if has_events_worker:
+                try:
+                    EventsWorker.instance().wait_until_empty()
+                except Exception:
+                    get_logger("task_runner").debug(
+                        "Failed to flush subprocess EventsWorker; "
+                        "some events may not have been forwarded to the parent"
+                        " process",
+                        exc_info=True,
+                    )
+
+            return result
 
 
 class _ChainedFuture(concurrent.futures.Future[bytes]):
@@ -547,14 +707,19 @@ class _UnpicklingFuture(concurrent.futures.Future[R]):
 
     def __init__(self, wrapped_future: concurrent.futures.Future[bytes]):
         self.wrapped_future = wrapped_future
+        self._deserialization_error: BaseException | None = None
 
     def result(self, timeout: float | None = None) -> R:
+        if self._deserialization_error is not None:
+            raise self._deserialization_error
         pickled_result = self.wrapped_future.result(timeout)
         import cloudpickle
 
         return cloudpickle.loads(pickled_result)
 
     def exception(self, timeout: float | None = None) -> BaseException | None:
+        if self._deserialization_error is not None:
+            return self._deserialization_error
         return self.wrapped_future.exception(timeout)
 
     def done(self) -> bool:
@@ -570,10 +735,13 @@ class _UnpicklingFuture(concurrent.futures.Future[R]):
         self, fn: Callable[[concurrent.futures.Future[R]], object]
     ) -> None:
         def _fn(wrapped_future: concurrent.futures.Future[bytes]) -> None:
-            import cloudpickle
+            try:
+                import cloudpickle
 
-            result = cloudpickle.loads(wrapped_future.result())
-            fn(result)
+                cloudpickle.loads(wrapped_future.result())
+            except Exception as e:
+                self._deserialization_error = e
+            fn(self)
 
         return self.wrapped_future.add_done_callback(_fn)
 
@@ -589,6 +757,10 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
     Attributes:
         max_workers: The maximum number of processes to use for executing tasks.
             Defaults to `multiprocessing.cpu_count()` if `PREFECT_TASKS_RUNNER_PROCESS_POOL_MAX_WORKERS` is not set.
+        initializer: An optional picklable callable run once in each worker
+            subprocess before it executes any tasks, mirroring
+            `ProcessPoolExecutor`'s `initializer`.
+        initargs: A tuple of arguments passed to `initializer`.
 
     Examples:
         Use a process pool task runner with a flow:
@@ -644,6 +816,21 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
             ...
         ```
 
+        Run custom setup in each worker subprocess:
+
+        ```python
+        import sys
+        from prefect.task_runners import ProcessPoolTaskRunner
+
+        def add_to_path(*paths):
+            sys.path[:0] = paths
+
+        runner = ProcessPoolTaskRunner(
+            initializer=add_to_path,
+            initargs=("/opt/my_app/libs",),
+        )
+        ```
+
     Note:
         Process pool task runners provide process isolation but have overhead for
         inter-process communication. They are most beneficial for CPU-bound tasks
@@ -658,7 +845,15 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
         variable passing to subprocess workers.
     """
 
-    def __init__(self, max_workers: int | None = None):
+    def __init__(
+        self,
+        max_workers: int | None = None,
+        subprocess_message_processor_factories: (
+            Iterable[_SubprocessMessageProcessorFactory] | None
+        ) = None,
+        initializer: Callable[..., None] | None = None,
+        initargs: tuple[Any, ...] = (),
+    ):
         super().__init__()
         current_settings = get_current_settings()
         self._executor: ProcessPoolExecutor | None = None
@@ -668,10 +863,221 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
             or current_settings.tasks.runner.process_pool_max_workers
             or multiprocessing.cpu_count()
         )
+        self._initializer = initializer
+        self._initargs = tuple(initargs)
         self._cancel_events: dict[uuid.UUID, multiprocessing.Event] = {}
+        self._subprocess_message_queue: Any | None = None
+        self._message_forwarding_thread: threading.Thread | None = None
+        self._subprocess_message_processor_factories: tuple[
+            _SubprocessMessageProcessorFactory, ...
+        ] = tuple(subprocess_message_processor_factories or ())
+        self._cached_context: dict[str, Any] | None = None
+        self._cached_env: dict[str, str] | None = None
 
     def duplicate(self) -> Self:
-        return type(self)(max_workers=self._max_workers)
+        duplicate_runner = type(self)(max_workers=self._max_workers)
+        # Set post-construction so subclasses that narrow __init__ still duplicate.
+        duplicate_runner._initializer = getattr(self, "_initializer", None)
+        duplicate_runner._initargs = getattr(self, "_initargs", ())
+        duplicate_runner.subprocess_message_processor_factories = (
+            self.subprocess_message_processor_factories
+        )
+        return duplicate_runner
+
+    @property
+    def subprocess_message_processor_factories(
+        self,
+    ) -> tuple[_SubprocessMessageProcessorFactory, ...]:
+        return getattr(self, "_subprocess_message_processor_factories", ())
+
+    @subprocess_message_processor_factories.setter
+    def subprocess_message_processor_factories(
+        self,
+        subprocess_message_processor_factories: (
+            Iterable[_SubprocessMessageProcessorFactory] | None
+        ) = None,
+    ) -> None:
+        if self._started:
+            raise RuntimeError(
+                "Cannot configure subprocess message processor factories while task runner is started"
+            )
+        self._subprocess_message_processor_factories = tuple(
+            subprocess_message_processor_factories or ()
+        )
+
+    def set_subprocess_message_processor_factories(
+        self,
+        subprocess_message_processor_factories: (
+            Iterable[_SubprocessMessageProcessorFactory] | None
+        ) = None,
+    ) -> None:
+        self.subprocess_message_processor_factories = (
+            subprocess_message_processor_factories
+        )
+
+    def _process_subprocess_message(
+        self,
+        message_type: str,
+        message_payload: Any,
+        message_processors: tuple[_SubprocessMessageProcessor, ...],
+    ) -> tuple[str, Any] | None:
+        processed_message_type = message_type
+        processed_message_payload = message_payload
+
+        for processor in message_processors:
+            try:
+                processed_message = processor(
+                    processed_message_type, processed_message_payload
+                )
+            except Exception:
+                self.logger.exception(
+                    "Dropping subprocess message because processor %r raised an exception.",
+                    processor,
+                )
+                return None
+
+            if processed_message is None:
+                return None
+            if (
+                not isinstance(processed_message, tuple)
+                or len(processed_message) != 2
+                or not isinstance(processed_message[0], str)
+            ):
+                self.logger.warning(
+                    "Dropping subprocess message because processor %r returned invalid payload: %r",
+                    processor,
+                    processed_message,
+                )
+                return None
+
+            processed_message_type, processed_message_payload = processed_message
+
+        return processed_message_type, processed_message_payload
+
+    def _forward_subprocess_messages(self) -> None:
+        message_queue = self._subprocess_message_queue
+        if message_queue is None:
+            return
+
+        events_worker: EventsWorker | None = None
+        api_log_worker: APILogWorker | None = None
+        disable_event_forwarding = False
+        disable_log_forwarding = False
+        message_processors: list[_SubprocessMessageProcessor] = []
+        for processor_factory in self._subprocess_message_processor_factories:
+            try:
+                message_processors.append(processor_factory())
+            except Exception:
+                self.logger.exception(
+                    "Ignoring subprocess message processor factory %r after initialization failure.",
+                    processor_factory,
+                )
+        message_processor_tuple = tuple(message_processors)
+
+        while True:
+            try:
+                queued_item = message_queue.get()
+            except (EOFError, OSError):
+                return
+
+            if queued_item == _PROCESS_POOL_MESSAGE_QUEUE_SHUTDOWN:
+                return
+
+            if (
+                not isinstance(queued_item, tuple)
+                or len(queued_item) != 2
+                or not isinstance(queued_item[0], str)
+            ):
+                self.logger.warning(
+                    "Ignoring unexpected subprocess message payload: %r",
+                    queued_item,
+                )
+                continue
+
+            message_type, message_payload = queued_item
+            processed_message = self._process_subprocess_message(
+                message_type,
+                message_payload,
+                message_processor_tuple,
+            )
+            if processed_message is None:
+                continue
+            message_type, message_payload = processed_message
+
+            try:
+                if message_type == _PROCESS_POOL_MESSAGE_TYPE_EVENT:
+                    if not isinstance(message_payload, Event):
+                        self.logger.warning(
+                            "Ignoring unexpected subprocess event payload type: %r",
+                            type(message_payload),
+                        )
+                        continue
+                    if disable_event_forwarding:
+                        continue
+                    if events_worker is None:
+                        events_worker = EventsWorker.instance()
+                    events_worker.send(message_payload)
+                elif message_type == _PROCESS_POOL_MESSAGE_TYPE_LOG:
+                    if not isinstance(message_payload, dict):
+                        self.logger.warning(
+                            "Ignoring unexpected subprocess log payload type: %r",
+                            type(message_payload),
+                        )
+                        continue
+                    if disable_log_forwarding:
+                        continue
+                    if api_log_worker is None:
+                        api_log_worker = APILogWorker.instance()
+                    api_log_worker.send(message_payload)
+                else:
+                    self.logger.warning(
+                        "Ignoring unknown subprocess message type: %r", message_type
+                    )
+            except RuntimeError:
+                if message_type == _PROCESS_POOL_MESSAGE_TYPE_EVENT:
+                    disable_event_forwarding = True
+                    events_worker = None
+                elif message_type == _PROCESS_POOL_MESSAGE_TYPE_LOG:
+                    disable_log_forwarding = True
+                    api_log_worker = None
+
+                self.logger.debug(
+                    "Disabling subprocess %s forwarding after worker runtime error.",
+                    message_type,
+                    exc_info=True,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to forward subprocess-emitted message to parent worker."
+                )
+
+    def _stop_message_forwarding(self) -> None:
+        message_queue = self._subprocess_message_queue
+        forwarding_thread = self._message_forwarding_thread
+
+        if message_queue is not None:
+            try:
+                message_queue.put_nowait(_PROCESS_POOL_MESSAGE_QUEUE_SHUTDOWN)
+            except (ValueError, OSError):
+                pass
+
+        if forwarding_thread is not None:
+            forwarding_thread.join(timeout=5)
+            if forwarding_thread.is_alive():
+                self.logger.warning(
+                    "Timed out waiting for process-pool message forwarding to stop."
+                )
+                # Leave references intact so we don't race with a live thread.
+                return
+            self._message_forwarding_thread = None
+
+        if message_queue is not None:
+            try:
+                message_queue.close()
+                message_queue.join_thread()
+            except (AttributeError, OSError, ValueError):
+                pass
+            self._subprocess_message_queue = None
 
     def _resolve_futures_and_submit(
         self,
@@ -693,9 +1099,16 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
         """
         from prefect.utilities.engine import resolve_inputs_sync
 
-        # Wait for all futures in wait_for to complete
+        # Wait for all futures in wait_for to complete and collect their
+        # terminal states.  Futures themselves are not picklable, but State
+        # objects are, and the subprocess task engine's _wait_for_dependencies
+        # handles State objects via resolve_to_final_result — correctly raising
+        # UpstreamTaskError for non-completed upstreams.
+        wait_for_states = None
         if wait_for:
-            wait(list(wait_for))
+            wait_for_list = list(wait_for)
+            wait(wait_for_list)
+            wait_for_states = [f.state for f in wait_for_list]
 
         # Resolve any futures in parameters to their actual values
         resolved_parameters = resolve_inputs_sync(
@@ -707,7 +1120,7 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
             task=task,
             task_run_id=task_run_id,
             parameters=resolved_parameters,
-            wait_for=None,  # Already waited, no need to pass futures to subprocess
+            wait_for=wait_for_states,
             return_type="state",
             dependencies=dependencies,
             context=context,
@@ -788,14 +1201,17 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
                 f"Submitting task {task.name} to process pool executor..."
             )
 
-        # Serialize the current context for the subprocess
-        from prefect.context import serialize_context
+        # Serialize the current context for the subprocess (cached per runner lifecycle)
+        if self._cached_context is None:
+            from prefect.context import serialize_context
 
-        context = serialize_context()
-        env = (
-            get_current_settings().to_environment_variables(exclude_unset=True)
-            | os.environ
-        )
+            self._cached_context = serialize_context()
+            self._cached_env = (
+                get_current_settings().to_environment_variables(exclude_unset=True)
+                | os.environ
+            )
+        context = self._cached_context
+        env = self._cached_env
 
         # Submit the resolution and subprocess execution to a background thread
         # This keeps submit() non-blocking while still resolving futures before pickling
@@ -845,6 +1261,10 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
         return super().map(task, parameters, wait_for)
 
     def cancel_all(self) -> None:
+        # Invalidate cached context and env so they are recomputed on next start
+        self._cached_context = None
+        self._cached_env = None
+
         # Clear cancel events first to avoid resource tracking issues
         events_to_set = list(self._cancel_events.values())
         self._cancel_events.clear()
@@ -861,15 +1281,40 @@ class ProcessPoolTaskRunner(TaskRunner[PrefectConcurrentFuture[Any]]):
             self._executor.shutdown(cancel_futures=True, wait=True)
             self._executor = None
 
+        self._stop_message_forwarding()
+
     def __enter__(self) -> Self:
         super().__enter__()
         # Use spawn method for cross-platform consistency and avoiding shared state issues
         mp_context = multiprocessing.get_context("spawn")
-        self._executor = ProcessPoolExecutor(
-            max_workers=self._max_workers, mp_context=mp_context
+        self._subprocess_message_queue = mp_context.Queue()
+        self._message_forwarding_thread = threading.Thread(
+            target=self._forward_subprocess_messages,
+            name="ProcessPoolTaskRunnerMessageForwarder",
+            daemon=True,
         )
-        # Create a thread pool for resolving futures before submitting to process pool
-        self._resolver_executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._message_forwarding_thread.start()
+
+        try:
+            self._executor = ProcessPoolExecutor(
+                max_workers=self._max_workers,
+                mp_context=mp_context,
+                initializer=_initialize_process_pool_worker,
+                initargs=(
+                    self._subprocess_message_queue,
+                    getattr(self, "_initializer", None),
+                    getattr(self, "_initargs", ()),
+                ),
+            )
+            # Create a thread pool for resolving futures before submitting to process pool
+            self._resolver_executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        except Exception:
+            if self._executor is not None:
+                self._executor.shutdown(cancel_futures=True, wait=True)
+                self._executor = None
+            self._stop_message_forwarding()
+            raise
+
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:

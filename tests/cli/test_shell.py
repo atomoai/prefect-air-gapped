@@ -1,9 +1,13 @@
 import os
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from prefect.cli.shell import run_shell_process
 from prefect.testing.cli import invoke_and_assert
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
+
+pytestmark = pytest.mark.clear_db
 
 
 async def test_shell_serve(prefect_client):
@@ -127,7 +131,7 @@ async def test_shell_watch_options(caplog, prefect_client):
 
 
 async def test_shell_runner_integration(monkeypatch):
-    with patch("prefect.cli.shell.Runner.start", new_callable=AsyncMock) as runner_mock:
+    with patch("prefect.runner.Runner.start", new_callable=AsyncMock) as runner_mock:
         flow_name = "Flood Brothers"
 
         await run_sync_in_worker_thread(

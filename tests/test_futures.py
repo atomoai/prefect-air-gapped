@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import Future
@@ -9,7 +11,8 @@ import pytest
 
 from prefect import flow, task
 from prefect.client.orchestration import PrefectClient
-from prefect.exceptions import MissingResult
+from prefect.context import FlowRunContext
+from prefect.exceptions import MissingResult, Pause
 from prefect.flow_engine import run_flow_async, run_flow_sync
 from prefect.futures import (
     PrefectConcurrentFuture,
@@ -24,7 +27,7 @@ from prefect.futures import (
     wait,
 )
 from prefect.server.events.pipeline import EventsPipeline
-from prefect.states import Completed, Failed
+from prefect.states import Completed, Failed, Suspended
 from prefect.task_engine import run_task_async, run_task_sync
 from prefect.task_runners import ThreadPoolTaskRunner
 
@@ -45,6 +48,12 @@ class MockFuture(PrefectWrappedFuture[Any, Future[Any]]):
         return self._final_state.result()
 
 
+def mark_flow_run_suspension_requested() -> None:
+    flow_run_context = FlowRunContext.get()
+    assert flow_run_context
+    flow_run_context.flow_run_suspension_request.mark_requested(Suspended())
+
+
 class TestUtilityFunctions:
     def test_wait(self):
         mock_futures = [MockFuture(data=i) for i in range(5)]
@@ -54,6 +63,16 @@ class TestUtilityFunctions:
         for future in mock_futures:
             assert future.state.is_completed()
 
+    def test_wait_with_negative_timeout_raises_value_error(self):
+        mock_futures = [MockFuture(data=i) for i in range(5)]
+        with pytest.raises(ValueError, match="'timeout' must be a non-negative number"):
+            wait(mock_futures, timeout=-1)
+
+    def test_as_completed_with_negative_timeout_raises_value_error(self):
+        mock_futures = [MockFuture(data=i) for i in range(5)]
+        with pytest.raises(ValueError, match="'timeout' must be a non-negative number"):
+            list(as_completed(mock_futures, timeout=-1))
+
     @pytest.mark.timeout(method="thread")
     def test_wait_with_timeout(self):
         mock_futures = [MockFuture(data=i) for i in range(5)]
@@ -62,11 +81,21 @@ class TestUtilityFunctions:
         futures = wait(mock_futures, timeout=0.01)
         assert futures.not_done == {mock_futures[-1]}
 
+    @pytest.mark.timeout(method="thread")
+    def test_wait_with_timeout_checks_flow_run_suspension(self):
+        @flow
+        def suspendable_flow():
+            hanging_future = Future()
+            future = PrefectConcurrentFuture(uuid.uuid4(), hanging_future)
+            mark_flow_run_suspension_requested()
+
+            wait([future], timeout=0.01)
+
+        with pytest.raises(Pause):
+            suspendable_flow()
+
     def test_wait_monitors_all_futures_concurrently_with_timeout(self):
         """Test that wait() with timeout monitors all futures concurrently, not sequentially."""
-        import threading
-        import time
-
         # Create a slow future first, then fast ones
         # If wait() is sequential, it will timeout on the slow one and miss the fast ones
         futures = []
@@ -91,14 +120,15 @@ class TestUtilityFunctions:
             thread.start()
 
         # Wait with timeout that allows fast futures to complete
-        done, not_done = wait(futures, timeout=0.1)
+        done, not_done = wait(futures, timeout=1.0)
 
         # Should have captured all 3 fast futures
         assert len(done) == 3
         assert len(not_done) == 1  # Just the slow future
 
-        # Verify we got the right futures
-        done_results = sorted([f.result() for f in done])
+        # Verify we got the right futures via the wrapped future to avoid
+        # run_coro_as_sync deadlocks under xdist parallel execution
+        done_results = sorted([f.wrapped_future.result().data for f in done])
         assert done_results == [1, 2, 3]
 
     def test_as_completed(self):
@@ -120,12 +150,59 @@ class TestUtilityFunctions:
             exc_info.value.args[0] == f"1 (of {len(mock_futures)}) futures unfinished"
         )
 
+    @pytest.mark.timeout(method="thread")
+    def test_as_completed_with_timeout_from_worker_thread(self):
+        """
+        Regression test: as_completed must respect `timeout` when consumed from a
+        real worker thread (where Prefect's watcher-thread cancellation cannot
+        interrupt a blocking `Event.wait()`).
+        """
+        hanging_future = Future()
+        future = PrefectConcurrentFuture(uuid.uuid4(), hanging_future)
+
+        caught: list[BaseException] = []
+
+        def consume_as_completed():
+            try:
+                for _ in as_completed([future], timeout=0.05):
+                    pass
+            except BaseException as exc:
+                caught.append(exc)
+
+        # Daemonized so a thread blocked on the broken implementation cannot hold up
+        # interpreter exit and take the whole test session down with it.
+        worker = threading.Thread(target=consume_as_completed, daemon=True)
+        worker.start()
+        worker.join(timeout=30.0)
+
+        if worker.is_alive():
+            hanging_future.set_result(Completed(data=None))
+            worker.join(timeout=30.0)
+            assert not worker.is_alive(), "Worker thread did not exit"
+            pytest.fail("as_completed did not time out in worker thread")
+
+        assert len(caught) == 1
+        assert isinstance(caught[0], TimeoutError)
+        assert caught[0].args[0] == "1 (of 1) futures unfinished"
+
+    @pytest.mark.timeout(method="thread")
+    def test_as_completed_with_zero_timeout_yields_completed_future(self):
+        """
+        A zero timeout is a non-blocking poll: futures whose wrapped future has
+        already completed (but whose `_final_state` has not yet been populated)
+        must still be yielded before the timeout is enforced.
+        """
+        completed_future = Future()
+        completed_future.set_result(Completed(data=42))
+        future = PrefectConcurrentFuture(uuid.uuid4(), completed_future)
+
+        results = [f.result() for f in as_completed([future], timeout=0)]
+        assert results == [42]
+
     @pytest.mark.usefixtures("use_hosted_api_server")
     def test_as_completed_yields_correct_order(self):
         @task
         def my_test_task(seconds):
-            import time
-
             time.sleep(seconds)
             return seconds
 
@@ -147,8 +224,6 @@ class TestUtilityFunctions:
     def test_as_completed_timeout(self):
         @task
         def my_test_task(seconds):
-            import time
-
             time.sleep(seconds)
             return seconds
 
@@ -167,11 +242,67 @@ class TestUtilityFunctions:
                     results.append(future.result())
             assert exc_info.value.args[0] == f"2 (of {len(timings)}) futures unfinished"
 
+    @pytest.mark.timeout(method="thread")
+    def test_wait_uses_private_completion_callback_for_prefect_concurrent_future(self):
+        wrapped_future = Future()
+        future = PrefectConcurrentFuture(uuid.uuid4(), wrapped_future)
+        callback_errors: list[BaseException] = []
+
+        def raising_callback(_future: PrefectFuture[Any]):
+            raise KeyboardInterrupt("boom")
+
+        future.add_done_callback(raising_callback)
+
+        def resolve_future():
+            try:
+                wrapped_future.set_result(Completed(data=42))
+            except BaseException as exc:
+                callback_errors.append(exc)
+
+        thread = threading.Thread(target=resolve_future)
+        thread.start()
+        done, not_done = wait([future], timeout=0.5)
+        thread.join()
+
+        assert done == {future}
+        assert not not_done
+        assert future.result() == 42
+        assert len(callback_errors) == 1
+        assert isinstance(callback_errors[0], KeyboardInterrupt)
+
+    @pytest.mark.timeout(method="thread")
+    def test_as_completed_uses_private_completion_callback_for_prefect_concurrent_future(
+        self,
+    ):
+        wrapped_future = Future()
+        future = PrefectConcurrentFuture(uuid.uuid4(), wrapped_future)
+        callback_errors: list[BaseException] = []
+
+        def raising_callback(_future: PrefectFuture[Any]):
+            raise KeyboardInterrupt("boom")
+
+        future.add_done_callback(raising_callback)
+
+        def resolve_future():
+            try:
+                wrapped_future.set_result(Completed(data=42))
+            except BaseException as exc:
+                callback_errors.append(exc)
+
+        thread = threading.Thread(target=resolve_future)
+        thread.start()
+        results = [
+            done_future.result() for done_future in as_completed([future], timeout=0.5)
+        ]
+        thread.join()
+
+        assert results == [42]
+        assert len(callback_errors) == 1
+        assert isinstance(callback_errors[0], KeyboardInterrupt)
+
     async def test_as_completed_yields_correct_order_dist(self, events_pipeline):
         @task
         async def my_task(seconds):
-            import time
-
             time.sleep(seconds)
             return seconds
 
@@ -249,6 +380,22 @@ class TestPrefectConcurrentFuture:
         with pytest.raises(ValueError, match="oops"):
             future.result(raise_on_failure=True)
 
+    @pytest.mark.parametrize("method", ["wait", "result"])
+    def test_timeout_checks_flow_run_suspension(self, method: str):
+        @flow
+        def suspendable_flow():
+            wrapped_future = Future()
+            future = PrefectConcurrentFuture(uuid.uuid4(), wrapped_future)
+            mark_flow_run_suspension_requested()
+
+            if method == "wait":
+                future.wait(timeout=0.01)
+            else:
+                future.result(timeout=0.01)
+
+        with pytest.raises(Pause):
+            suspendable_flow()
+
 
 class TestResolveFuturesToStates:
     async def test_resolve_futures_transforms_future(self):
@@ -305,6 +452,20 @@ class TestResolveFuturesToStates:
             nested_dict={"key": [future.state]},
         )
 
+    def test_resolve_futures_to_states_downcasts_prefect_future_list(self):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/21220
+
+        resolve_futures_to_states should downcast PrefectFutureList to a plain
+        list so that callers don't receive a PrefectFutureList whose methods
+        (result, wait) assume the elements are PrefectFuture objects.
+        """
+        future = MockFuture(data="foo")
+        future_list = PrefectFutureList([future, future])
+        result = resolve_futures_to_states(future_list)
+        assert isinstance(result, list)
+        assert not isinstance(result, PrefectFutureList)
+        assert result == [future.state, future.state]
+
 
 class TestResolveFuturesToResults:
     def test_resolve_futures_to_results_with_no_futures(self):
@@ -355,6 +516,20 @@ class TestResolveFuturesToResults:
             nested_dict={"key": ["bar"]},
         )
 
+    def test_resolve_futures_to_results_downcasts_prefect_future_list(self):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/21220
+
+        resolve_futures_to_results should downcast PrefectFutureList to a plain
+        list so that callers don't receive a PrefectFutureList whose methods
+        (result, wait) assume the elements are PrefectFuture objects.
+        """
+        future = MockFuture(data="foo")
+        future_list = PrefectFutureList([future, future])
+        result = resolve_futures_to_results(future_list)
+        assert isinstance(result, list)
+        assert not isinstance(result, PrefectFutureList)
+        assert result == ["foo", "foo"]
+
 
 class TestPrefectDistributedFuture:
     async def test_wait_with_timeout(self, task_run):
@@ -378,6 +553,27 @@ class TestPrefectDistributedFuture:
         future = PrefectDistributedFuture(task_run_id=task_run.id)
         future.wait(timeout=0.25)
         assert future.state.is_pending()
+
+    @pytest.mark.parametrize("method", ["wait", "result"])
+    async def test_timeout_checks_flow_run_suspension(self, method: str):
+        @task
+        async def my_task():
+            return 42
+
+        task_run = await my_task.create_run()
+        future = PrefectDistributedFuture(task_run_id=task_run.id)
+
+        @flow
+        def suspendable_flow():
+            mark_flow_run_suspension_requested()
+
+            if method == "wait":
+                future.wait(timeout=0.01)
+            else:
+                future.result(timeout=0.01)
+
+        with pytest.raises(Pause):
+            suspendable_flow()
 
     async def test_wait_without_timeout(self, events_pipeline):
         @task
@@ -557,6 +753,34 @@ class TestPrefectFlowRunFuture:
         future.wait(timeout=0.25)
         assert future.state.is_pending()
 
+    @pytest.mark.parametrize("method", ["wait", "result"])
+    async def test_timeout_checks_flow_run_suspension(
+        self,
+        prefect_client: PrefectClient,
+        method: str,
+    ):
+        @flow
+        async def my_flow():
+            return 42
+
+        flow_run = await prefect_client.create_flow_run(
+            flow=my_flow,
+            parameters={},
+        )
+        future = PrefectFlowRunFuture(flow_run_id=flow_run.id)
+
+        @flow
+        def suspendable_flow():
+            mark_flow_run_suspension_requested()
+
+            if method == "wait":
+                future.wait(timeout=0.01)
+            else:
+                future.result(timeout=0.01)
+
+        with pytest.raises(Pause):
+            suspendable_flow()
+
     async def test_wait_without_timeout(
         self, events_pipeline: EventsPipeline, prefect_client: PrefectClient
     ):
@@ -699,6 +923,12 @@ class TestPrefectFutureList:
         for future in futures:
             assert future.state.is_completed()
 
+    def test_result_with_negative_timeout_raises_value_error(self):
+        mock_futures = [MockFuture(data=i) for i in range(5)]
+        futures = PrefectFutureList(mock_futures)
+        with pytest.raises(ValueError, match="'timeout' must be a non-negative number"):
+            futures.result(timeout=-1)
+
     @pytest.mark.timeout(method="thread")  # alarm-based pytest-timeout will interfere
     def test_wait_with_timeout(self):
         mock_futures: List[PrefectFuture] = [MockFuture(data=i) for i in range(5)]
@@ -763,3 +993,117 @@ class TestPrefectFutureList:
 
         with pytest.raises(TimeoutError, match="oops"):
             futures.result()
+
+    @pytest.mark.timeout(method="thread")
+    def test_result_timeout_covers_slow_result_retrieval(self):
+        """The timeout also bounds result retrieval, which runs while
+        `as_completed` is suspended at its `yield`."""
+
+        class SlowResultFuture(MockFuture):
+            def result(
+                self,
+                timeout: Optional[float] = None,
+                raise_on_failure: bool = True,
+            ) -> Any:
+                time.sleep(1)
+                return 42
+
+        futures = PrefectFutureList([SlowResultFuture()])
+
+        with pytest.raises(
+            TimeoutError,
+            match="Timed out waiting for all futures to complete within 0.1 seconds",
+        ):
+            futures.result(timeout=0.1)
+
+    @pytest.mark.timeout(method="thread")
+    def test_result_timeout_raises_dedicated_message(self):
+        futures = PrefectFutureList([PrefectConcurrentFuture(uuid.uuid4(), Future())])
+
+        with pytest.raises(
+            TimeoutError,
+            match="Timed out waiting for all futures to complete within 0.5 seconds",
+        ):
+            futures.result(timeout=0.5)
+
+    def test_result_fail_fast(self):
+        """A fast failure should be raised even when a slow future precedes it."""
+        slow_future = Future()
+        fast_failing_future = Future()
+        fast_failing_future.set_exception(ValueError("fast fail"))
+
+        futures_list: List[PrefectFuture] = [
+            PrefectConcurrentFuture(uuid.uuid4(), slow_future),
+            PrefectConcurrentFuture(uuid.uuid4(), fast_failing_future),
+        ]
+        futures = PrefectFutureList(futures_list)
+
+        # Resolve the slow future in the background so as_completed can finish
+        def resolve_slow():
+            time.sleep(0.1)
+            slow_future.set_result(Completed(data=1))
+
+        t = threading.Thread(target=resolve_slow)
+        t.start()
+
+        with pytest.raises(ValueError, match="fast fail"):
+            futures.result()
+
+        t.join()
+
+    def test_result_preserves_order(self):
+        """Results should be returned in the original list order, not completion order."""
+        f1 = Future()
+        f2 = Future()
+
+        # f2 completes before f1
+        f2.set_result(Completed(data="second"))
+
+        futures_list: List[PrefectFuture] = [
+            PrefectConcurrentFuture(uuid.uuid4(), f1),
+            PrefectConcurrentFuture(uuid.uuid4(), f2),
+        ]
+        futures = PrefectFutureList(futures_list)
+
+        def resolve_f1():
+            time.sleep(0.05)
+            f1.set_result(Completed(data="first"))
+
+        t = threading.Thread(target=resolve_f1)
+        t.start()
+
+        result = futures.result()
+        assert result == ["first", "second"]
+
+        t.join()
+
+    def test_result_with_duplicate_futures(self):
+        """Duplicate future objects should produce the same result at each position."""
+        mock_future = MockFuture(data=42)
+        futures = PrefectFutureList([mock_future, MockFuture(data=1), mock_future])
+        result = futures.result()
+        assert result == [42, 1, 42]
+
+
+class TestFlowReturningMappedFutures:
+    """Regression tests for https://github.com/PrefectHQ/prefect/issues/21220
+
+    When a @flow returns a PrefectFutureList (e.g. from task.map()), the flow
+    engine resolves futures to states before returning. Previously, the
+    PrefectFutureList container type was preserved even though its elements
+    were no longer PrefectFuture objects, causing AttributeError when calling
+    .result() or .wait() on the return value.
+    """
+
+    def test_flow_returning_mapped_task_result(self):
+        @task
+        def add_one(x: int) -> int:
+            return x + 1
+
+        @flow
+        def my_flow():
+            return add_one.map([1, 2, 3])
+
+        result = my_flow()
+        assert isinstance(result, list)
+        assert not isinstance(result, PrefectFutureList)

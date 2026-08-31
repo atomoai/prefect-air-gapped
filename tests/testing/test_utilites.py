@@ -1,4 +1,4 @@
-import sys
+import gc
 import uuid
 import warnings
 from unittest.mock import MagicMock
@@ -8,12 +8,15 @@ import pytest
 from prefect import flow, task
 from prefect.client.orchestration import get_client
 from prefect.server import schemas
+from prefect.server.api.server import SubprocessASGIServer
 from prefect.settings import (
-    PREFECT_API_DATABASE_CONNECTION_URL,
     PREFECT_API_URL,
+    PREFECT_SERVER_DATABASE_CONNECTION_URL,
     PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS,
 )
 from prefect.testing.utilities import assert_does_not_warn, prefect_test_harness
+
+pytestmark = pytest.mark.clear_db
 
 
 def _multiprocessing_worker():
@@ -61,7 +64,7 @@ async def test_prefect_test_harness():
         test_task()
         return "foo"
 
-    existing_db_url = PREFECT_API_DATABASE_CONNECTION_URL.value()
+    existing_db_url = PREFECT_SERVER_DATABASE_CONNECTION_URL.value()
     existing_api_url = PREFECT_API_URL.value()
 
     with prefect_test_harness():
@@ -84,7 +87,7 @@ async def test_prefect_test_harness():
     assert PREFECT_API_URL.value() == existing_api_url
 
     # database connection should be reset
-    assert PREFECT_API_DATABASE_CONNECTION_URL.value() == existing_db_url
+    assert PREFECT_SERVER_DATABASE_CONNECTION_URL.value() == existing_db_url
 
     # outside the context, none of the test runs should not persist
     async with get_client() as client:
@@ -92,6 +95,19 @@ async def test_prefect_test_harness():
             flow_filter=schemas.filters.FlowFilter(name={"any_": [very_specific_name]})
         )
         assert len(flows) == 0
+
+
+def test_prefect_test_harness_uses_fresh_server_when_default_server_is_running():
+    stray_server = SubprocessASGIServer()
+    stray_server.start()
+
+    try:
+        with prefect_test_harness():
+            assert PREFECT_API_URL.value() != stray_server.api_url
+
+        assert stray_server.running
+    finally:
+        stray_server.stop()
 
 
 def test_prefect_test_harness_timeout(monkeypatch):
@@ -118,7 +134,7 @@ def test_prefect_test_harness_timeout(monkeypatch):
         )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="fork() not available on Windows")
+@pytest.mark.unix
 def test_multiprocessing_after_test_harness():
     """
     Test that multiprocessing works after using prefect_test_harness.
@@ -148,3 +164,80 @@ def test_multiprocessing_after_test_harness():
 
     # Verify process completed successfully
     assert process.exitcode == 0, "Process should complete without deadlock"
+
+
+def test_prefect_test_harness_multiple_runs():
+    """
+    Test that running prefect_test_harness multiple times doesn't cause errors.
+
+    Regression test for issue #19342 - running the test harness multiple times
+    in the same process would cause FOREIGN KEY constraint failures because the
+    EventsWorker singleton persisted stale events across harness sessions.
+    """
+
+    @task
+    def example_task():
+        return "task completed"
+
+    @flow
+    def example_flow():
+        return example_task()
+
+    # Run the test harness twice - the second run would fail with the bug
+    with prefect_test_harness():
+        result1 = example_flow()
+        assert result1 == "task completed"
+
+    with prefect_test_harness():
+        result2 = example_flow()
+        assert result2 == "task completed"
+
+
+def test_prefect_test_harness_does_not_spawn_second_server():
+    """
+    Test that prefect_test_harness does not spawn a second SubprocessASGIServer.
+
+    Regression test for issue #21544 - when prefect_test_harness passed a specific
+    port to SubprocessASGIServer, the singleton keyed by that port did not match
+    subsequent SubprocessASGIServer() calls (keyed by None), causing a second
+    unmanaged server subprocess to be spawned. This second server was never
+    explicitly stopped, causing pytest to hang on CI after all tests completed.
+    """
+
+    @task
+    def simple_task():
+        return 1
+
+    @flow
+    def simple_flow():
+        return simple_task.submit()
+
+    with prefect_test_harness():
+        simple_flow()
+        # All instance entries should point to the same server object.
+        # If a SubprocessASGIServer() call during flow execution created a
+        # separate instance (different object), it means an unmanaged server
+        # subprocess was spawned that would never be explicitly stopped.
+        unique_instances = set(
+            id(inst) for inst in SubprocessASGIServer._instances.values()
+        )
+        assert len(unique_instances) == 1, (
+            f"Expected all SubprocessASGIServer entries to be the same instance, "
+            f"but found {len(unique_instances)} distinct instances "
+            f"across keys {list(SubprocessASGIServer._instances.keys())}"
+        )
+
+
+@pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
+async def test_prefect_test_harness_async_cleanup():
+    """
+    Test that prefect_test_harness properly cleans up in async contexts.
+
+    Regression test for issue #19762 - when prefect_test_harness is used in an
+    async context, the drain_all() and drain() calls return coroutines that were
+    never awaited, causing RuntimeWarning: coroutine 'wait' was never awaited.
+    """
+    with prefect_test_harness():
+        pass
+    # Force garbage collection to trigger finalization of any unawaited coroutines
+    gc.collect()

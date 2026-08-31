@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 import sqlalchemy as sa
 
-from prefect._result_records import ResultRecordMetadata
+from prefect._internal.result_records import ResultRecordMetadata
 from prefect.server import schemas
 from prefect.server.concurrency.lease_storage import get_concurrency_lease_storage
 from prefect.server.database import orm_models as orm
@@ -27,7 +27,6 @@ from prefect.server.orchestration.core_policy import (
     BypassCancellingFlowRunsWithNoInfra,
     CacheInsertion,
     CacheRetrieval,
-    CopyDeploymentConcurrencyLeaseID,
     CopyScheduledTime,
     CopyTaskParametersID,
     EnforceCancellingToCancelledTransition,
@@ -36,8 +35,10 @@ from prefect.server.orchestration.core_policy import (
     HandlePausingFlows,
     HandleResumingPausedFlows,
     HandleTaskTerminalStateTransitions,
+    PreserveDeploymentConcurrencyLeaseId,
     PreventDuplicateTransitions,
     PreventPendingTransitions,
+    PreventResultDataLoss,
     PreventRunningTasksFromStoppedFlows,
     ReleaseFlowConcurrencySlots,
     ReleaseTaskConcurrencySlots,
@@ -48,6 +49,7 @@ from prefect.server.orchestration.core_policy import (
     SecureFlowConcurrencySlots,
     SecureTaskConcurrencySlots,
     UpdateFlowRunTrackerOnTasks,
+    ValidateDeploymentConcurrencyAtRunning,
     WaitForScheduledTime,
 )
 from prefect.server.orchestration.rules import (
@@ -62,9 +64,12 @@ from prefect.server.schemas.states import StateType
 from prefect.settings import (
     PREFECT_DEPLOYMENT_CONCURRENCY_SLOT_WAIT_SECONDS,
     PREFECT_SERVER_CONCURRENCY_INITIAL_DEPLOYMENT_LEASE_DURATION,
+    get_current_settings,
     temporary_settings,
 )
 from prefect.types._datetime import DateTime, now, parse_datetime
+
+pytestmark = pytest.mark.clear_db
 
 # Convert constants from sets to lists for deterministic ordering of tests
 ALL_ORCHESTRATION_STATES = list(
@@ -1156,6 +1161,47 @@ class TestTaskRetryingRule:
             rel_tol=0.1,
         )
 
+    async def test_jitter_with_zero_delay_does_not_raise(
+        self, session, initialize_orchestration
+    ):
+        """Regression test: setting retry_jitter_factor without retry_delay must not
+        raise ZeroDivisionError.
+
+        clamped_poisson_interval(0, ...) divides by zero when computing the exponential
+        CDF with average_interval=0.  The policy must skip jitter and fall back to
+        base_delay (0) when retry_delay is None or 0.
+        """
+        retry_policy = [RetryFailedTasks]
+        initial_state_type = states.StateType.RUNNING
+        proposed_state_type = states.StateType.FAILED
+        intended_transition = (initial_state_type, proposed_state_type)
+        ctx = await initialize_orchestration(
+            session,
+            "task",
+            *intended_transition,
+        )
+
+        orm_run = ctx.run
+        run_settings = ctx.run_settings
+        orm_run.run_count = 1
+        run_settings.retries = 2
+        # retry_delay intentionally left unset (None → base_delay=0)
+        run_settings.retry_delay = None
+        run_settings.retry_jitter_factor = 0.5
+
+        # Should not raise ZeroDivisionError
+        async with contextlib.AsyncExitStack() as stack:
+            orchestration_start = now("UTC")
+            for rule in retry_policy:
+                ctx = await stack.enter_async_context(rule(ctx, *intended_transition))
+            await ctx.validate_proposed_state()
+
+        scheduled_time = ctx.validated_state.state_details.scheduled_time
+        assert ctx.response_status == SetStateStatus.REJECT
+        assert ctx.validated_state_type == states.StateType.SCHEDULED
+        # With base_delay=0, the scheduled time should be approximately now (no delay).
+        assert abs((scheduled_time - orchestration_start).total_seconds()) < 5
+
     async def test_stops_retrying_eventually(
         self,
         session,
@@ -1517,6 +1563,169 @@ class TestTransitionsFromTerminalStatesRule:
 
 
 @pytest.mark.parametrize("run_type", ["flow"])
+class TestPreventResultDataLoss:
+    """Prevent COMPLETED → COMPLETED transitions that would discard result data.
+
+    See https://github.com/PrefectHQ/prefect/issues/21955
+    """
+
+    async def test_rejects_completed_to_completed_when_result_data_is_lost(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=ResultRecordMetadata.model_construct().model_dump(),
+        )
+
+        rule = PreventResultDataLoss(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.REJECT
+
+    async def test_allows_completed_to_completed_without_result_data(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=None,
+        )
+
+        rule = PreventResultDataLoss(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+
+    async def test_allows_completed_to_completed_with_unpersisted_initial(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data={"type": "unpersisted"},
+        )
+
+        rule = PreventResultDataLoss(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+
+    async def test_handle_flow_terminal_also_rejects_data_loss(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        """HandleFlowTerminalStateTransitions also guards against data loss."""
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=ResultRecordMetadata.model_construct().model_dump(),
+        )
+
+        rule = HandleFlowTerminalStateTransitions(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.REJECT
+
+    @pytest.mark.parametrize("scalar_data", [1, "hello", True, [1, 2, 3]])
+    async def test_accepts_scalar_initial_data(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        scalar_data: object,
+    ):
+        """Scalar/list initial data must not trigger AttributeError."""
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=scalar_data,
+        )
+
+        rule = PreventResultDataLoss(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+
+    @pytest.mark.parametrize("scalar_data", [1, "hello", True, [1, 2, 3]])
+    async def test_accepts_scalar_proposed_data_with_persisted_initial(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        scalar_data: object,
+    ):
+        """Persisted initial + scalar proposed must not trigger AttributeError."""
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=ResultRecordMetadata.model_construct().model_dump(),
+        )
+        # Manually set scalar data on the proposed state
+        assert ctx.proposed_state is not None
+        ctx.proposed_state.data = scalar_data
+
+        rule = PreventResultDataLoss(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        # Scalar proposed data is not persisted result metadata, so the
+        # transition should be rejected to prevent data loss.
+        assert ctx.response_status == SetStateStatus.REJECT
+
+    @pytest.mark.parametrize("scalar_data", [1, "hello", True, [1, 2, 3]])
+    async def test_handle_flow_terminal_accepts_scalar_initial_data(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        scalar_data: object,
+    ):
+        """HandleFlowTerminalStateTransitions must not AttributeError on scalar data."""
+        intended_transition = (StateType.COMPLETED, StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_data=scalar_data,
+        )
+
+        rule = HandleFlowTerminalStateTransitions(ctx, *intended_transition)
+        async with rule as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+
+
+@pytest.mark.parametrize("run_type", ["flow"])
 class TestEnsureOnlyScheduledFlowMarkedLate:
     """Ensure that only scheduled flow runs are marked late"""
 
@@ -1576,6 +1785,35 @@ class TestEnsureOnlyScheduledFlowMarkedLate:
             await ctx.validate_proposed_state()
 
         assert ctx.response_status == SetStateStatus.ACCEPT
+
+    @pytest.mark.parametrize(
+        "intended_transition",
+        [
+            (StateType.SCHEDULED, StateType.SCHEDULED),
+        ],
+        ids=transition_names,
+    )
+    async def test_reject_marking_already_late_flow_as_late(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        intended_transition,
+    ):
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_name="Late",
+            proposed_state_name="Late",
+        )
+
+        state_protection = EnsureOnlyScheduledFlowsMarkedLate(ctx, *intended_transition)
+
+        async with state_protection as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.REJECT
 
 
 @pytest.mark.parametrize("run_type", ["flow"])
@@ -1637,6 +1875,122 @@ class TestPreventPendingTransitions:
             await ctx.validate_proposed_state()
 
         assert ctx.response_status == SetStateStatus.ACCEPT
+
+    @pytest.mark.parametrize(
+        "initial_name,proposed_name",
+        [
+            ("Pending", "Submitting"),
+            ("Submitting", "InfrastructurePending"),
+            ("Pending", "InfrastructurePending"),
+        ],
+    )
+    async def test_pending_to_pending_with_different_name_is_accepted(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        initial_name,
+        proposed_name,
+    ):
+        intended_transition = (StateType.PENDING, StateType.PENDING)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_name=initial_name,
+            proposed_state_name=proposed_name,
+        )
+
+        state_protection = PreventPendingTransitions(ctx, *intended_transition)
+
+        async with state_protection as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+
+    async def test_pending_to_pending_with_same_name_is_aborted(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        intended_transition = (StateType.PENDING, StateType.PENDING)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_name="Pending",
+            proposed_state_name="Pending",
+        )
+
+        state_protection = PreventPendingTransitions(ctx, *intended_transition)
+
+        async with state_protection as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ABORT
+
+    @pytest.mark.parametrize(
+        "initial_name",
+        ["Submitting", "InfrastructurePending"],
+    )
+    async def test_pending_back_to_pending_is_aborted(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+        initial_name,
+    ):
+        """A second worker re-proposing Pending after the run has already
+        advanced to a named sub-state should still be blocked."""
+        intended_transition = (StateType.PENDING, StateType.PENDING)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_name=initial_name,
+            proposed_state_name="Pending",
+        )
+
+        state_protection = PreventPendingTransitions(ctx, *intended_transition)
+
+        async with state_protection as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ABORT
+
+    async def test_pending_name_change_preserves_state_details(
+        self,
+        session,
+        run_type,
+        initialize_orchestration,
+    ):
+        lease_id = uuid4()
+        scheduled_time = now("UTC")
+        intended_transition = (StateType.PENDING, StateType.PENDING)
+        ctx = await initialize_orchestration(
+            session,
+            run_type,
+            *intended_transition,
+            initial_state_name="Pending",
+            proposed_state_name="Submitting",
+        )
+
+        # Set details on the initial state directly since they may not
+        # round-trip through the DB in the test fixture.
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        ctx.initial_state.state_details.scheduled_time = scheduled_time
+
+        state_protection = PreventPendingTransitions(ctx, *intended_transition)
+
+        async with state_protection as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id == lease_id
+        )
+        assert ctx.proposed_state.state_details.scheduled_time == scheduled_time
 
 
 @pytest.mark.parametrize("run_type", ["task"])
@@ -3142,6 +3496,43 @@ class TestHandleCancellingStateTransitions:
         assert ctx.response_status == SetStateStatus.REJECT
         assert ctx.validated_state_type == states.StateType.CANCELLING
 
+    @pytest.mark.parametrize(
+        "proposed_state_type",
+        sorted(
+            list(set(ALL_ORCHESTRATION_STATES) - {states.StateType.CANCELLED, None})
+        ),
+    )
+    async def test_does_not_block_cancelled_to_other_states(
+        self,
+        session,
+        initialize_orchestration,
+        proposed_state_type,
+    ):
+        """
+        The EnforceCancellingToCancelledTransition rule should only apply to
+        CANCELLING states, not CANCELLED states. CANCELLED flows should be
+        allowed to transition to other states (e.g., for retry functionality).
+
+        This is a regression test for https://github.com/PrefectHQ/prefect/issues/20271
+        """
+        initial_state_type = states.StateType.CANCELLED
+        intended_transition = (initial_state_type, proposed_state_type)
+
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            *intended_transition,
+        )
+
+        async with EnforceCancellingToCancelledTransition(
+            ctx, *intended_transition
+        ) as ctx:
+            await ctx.validate_proposed_state()
+
+        # The rule should NOT reject transitions from CANCELLED state
+        # because this rule is specifically for CANCELLING -> CANCELLED enforcement
+        assert ctx.response_status != SetStateStatus.REJECT
+
 
 class TestBypassCancellingFlowRunsWithNoInfra:
     async def test_rejects_cancelling_scheduled_flow_and_sets_to_cancelled(
@@ -3460,16 +3851,22 @@ class TestFlowConcurrencyLimits:
         limit,
         flow,
         collision_strategy: Optional[schemas.core.ConcurrencyLimitStrategy] = None,
+        grace_period_seconds: Optional[int] = None,
     ):
         deployment_kwargs = {
             "name": f"test-deployment-{uuid4()}",
             "flow_id": flow.id,
             "concurrency_limit": limit,
         }
-        if collision_strategy:
+        if collision_strategy or grace_period_seconds is not None:
             deployment_kwargs["concurrency_options"] = {
                 "collision_strategy": collision_strategy
+                or schemas.core.ConcurrencyLimitStrategy.ENQUEUE
             }
+            if grace_period_seconds is not None:
+                deployment_kwargs["concurrency_options"]["grace_period_seconds"] = (
+                    grace_period_seconds
+                )
 
         deployment = await deployments.create_deployment(
             session=session,
@@ -3747,7 +4144,9 @@ class TestFlowConcurrencyLimits:
 
             async with contextlib.AsyncExitStack() as stack:
                 ctx1_running = await stack.enter_async_context(
-                    CopyDeploymentConcurrencyLeaseID(ctx1_running, *running_transition)
+                    ValidateDeploymentConcurrencyAtRunning(
+                        ctx1_running, *running_transition
+                    )
                 )
                 await ctx1_running.validate_proposed_state()
 
@@ -3796,6 +4195,106 @@ class TestFlowConcurrencyLimits:
                 await ctx2_retry.validate_proposed_state()
 
             assert ctx2_retry.response_status == SetStateStatus.ACCEPT
+
+    async def test_release_concurrency_slots_with_lease_does_not_require_deployment(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        assert (
+            ctx.validated_state.state_details.deployment_concurrency_lease_id
+            is not None
+        )
+        await assert_deployment_concurrency_limit(
+            session, deployment, expected_limit=1, expected_active_slots=1
+        )
+
+        completed_transition = (states.StateType.PENDING, states.StateType.COMPLETED)
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            *completed_transition,
+            deployment_id=deployment.id,
+            run_override=ctx.run,
+            initial_details=ctx.validated_state.state_details,
+        )
+
+        with mock.patch(
+            "prefect.server.models.deployments.read_deployment",
+            return_value=None,
+        ):
+            async with contextlib.AsyncExitStack() as stack:
+                ctx = await stack.enter_async_context(
+                    ReleaseFlowConcurrencySlots(ctx, *completed_transition)
+                )
+                await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_storage = get_concurrency_lease_storage()
+        lease_ids = await lease_storage.read_active_lease_ids()
+        assert len(lease_ids) == 0
+        await assert_deployment_concurrency_limit(
+            session, deployment, expected_limit=1, expected_active_slots=0
+        )
+
+    async def test_secure_cleanup_failure_on_fizzle_propagates(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        class StateMutatingRule(BaseOrchestrationRule):
+            FROM_STATES = ALL_ORCHESTRATION_STATES
+            TO_STATES = ALL_ORCHESTRATION_STATES
+
+            async def before_transition(self, initial_state, proposed_state, context):
+                await self.reject_transition(
+                    states.Scheduled(), reason="force deployment concurrency cleanup"
+                )
+
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        async def flaky_decrement(*args, **kwargs):
+            raise RuntimeError("storage flake during flow cleanup")
+
+        with mock.patch(
+            "prefect.server.models.concurrency_limits_v2.bulk_decrement_active_slots",
+            side_effect=flaky_decrement,
+        ):
+            with pytest.raises(RuntimeError, match="storage flake during flow cleanup"):
+                async with contextlib.AsyncExitStack() as stack:
+                    for rule in [SecureFlowConcurrencySlots, StateMutatingRule]:
+                        ctx = await stack.enter_async_context(
+                            rule(ctx, *pending_transition)
+                        )
+                    await ctx.validate_proposed_state()
+
+        await assert_deployment_concurrency_limit(
+            session, deployment, expected_limit=1, expected_active_slots=1
+        )
 
     async def test_cancel_new_collision_strategy(
         self,
@@ -4602,3 +5101,297 @@ class TestFlowConcurrencyLimits:
 
             actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
             assert abs(actual_ttl_seconds - 123.0) < 1  # Within 1 second
+
+    async def test_uses_server_setting_when_concurrency_options_not_set(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that server setting is used when concurrency_options is not set."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        expected_seconds = (
+            get_current_settings().server.concurrency.initial_deployment_lease_duration
+        )
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - expected_seconds) < 5
+
+    async def test_uses_server_setting_when_grace_period_seconds_not_set(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that server setting is used when concurrency_options exists but grace_period_seconds is not set."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session,
+            1,
+            flow,
+            collision_strategy=schemas.core.ConcurrencyLimitStrategy.ENQUEUE,
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        # Should use server setting (300s by default) when grace_period_seconds is not explicitly set
+        expected_seconds = (
+            get_current_settings().server.concurrency.initial_deployment_lease_duration
+        )
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - expected_seconds) < 5
+
+    async def test_uses_custom_grace_period_when_configured(
+        self,
+        session,
+        initialize_orchestration,
+        flow,
+    ):
+        """Test that custom grace period is used when configured."""
+        deployment = await self.create_deployment_with_concurrency_limit(
+            session, 1, flow, grace_period_seconds=720
+        )
+
+        pending_transition = (states.StateType.SCHEDULED, states.StateType.PENDING)
+
+        ctx = await initialize_orchestration(
+            session, "flow", *pending_transition, deployment_id=deployment.id
+        )
+
+        created_at = datetime.datetime.now(timezone.utc)
+
+        async with contextlib.AsyncExitStack() as stack:
+            ctx = await stack.enter_async_context(
+                SecureFlowConcurrencySlots(ctx, *pending_transition)
+            )
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        lease_id = ctx.validated_state.state_details.deployment_concurrency_lease_id
+        assert lease_id is not None
+
+        lease_storage = get_concurrency_lease_storage()
+        lease = await lease_storage.read_lease(lease_id=lease_id)
+        assert lease is not None
+
+        actual_ttl_seconds = (lease.expiration - created_at).total_seconds()
+        assert abs(actual_ttl_seconds - 720.0) < 5
+
+
+class TestPreserveDeploymentConcurrencyLeaseId:
+    """Tests for PreserveDeploymentConcurrencyLeaseId transform."""
+
+    async def test_lease_id_copied_when_proposed_is_null(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Main bug fix: copy lease ID when proposed state has null."""
+        lease_id = uuid4()
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            StateType.PENDING,
+            StateType.PENDING,
+            initial_state_name="Pending",
+            proposed_state_name="Submitting",
+        )
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        ctx.proposed_state.state_details.deployment_concurrency_lease_id = None
+
+        transform = PreserveDeploymentConcurrencyLeaseId(
+            ctx, StateType.PENDING, StateType.PENDING
+        )
+        async with transform as ctx:
+            pass
+
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id == lease_id
+        )
+
+    async def test_lease_id_not_overwritten_when_proposed_has_value(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Don't override if proposed state already has a lease ID."""
+        initial_lease = uuid4()
+        proposed_lease = uuid4()
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            StateType.PENDING,
+            StateType.PENDING,
+            initial_state_name="Pending",
+            proposed_state_name="Submitting",
+        )
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = initial_lease
+        ctx.proposed_state.state_details.deployment_concurrency_lease_id = (
+            proposed_lease
+        )
+
+        transform = PreserveDeploymentConcurrencyLeaseId(
+            ctx, StateType.PENDING, StateType.PENDING
+        )
+        async with transform as ctx:
+            pass
+
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id
+            == proposed_lease
+        )
+
+    async def test_handles_none_states(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Guard condition: handle initial_state or proposed_state being None."""
+        lease_id = uuid4()
+
+        # Test with initial_state = None
+        ctx = await initialize_orchestration(session, "flow", None, StateType.PENDING)
+        assert ctx.initial_state is None
+        transform = PreserveDeploymentConcurrencyLeaseId(ctx, None, StateType.PENDING)
+        async with transform as ctx:
+            pass
+        assert ctx.proposed_state is not None
+
+        # Test with proposed_state = None
+        ctx = await initialize_orchestration(session, "flow", StateType.PENDING, None)
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        assert ctx.proposed_state is None
+        transform = PreserveDeploymentConcurrencyLeaseId(ctx, StateType.PENDING, None)
+        async with transform as ctx:
+            pass
+        assert ctx.proposed_state is None
+
+    async def test_preserves_across_all_transition_types(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Universal transform: preserve across any transition type."""
+        lease_id = uuid4()
+
+        # Test PENDING → RUNNING
+        ctx = await initialize_orchestration(
+            session, "flow", StateType.PENDING, StateType.RUNNING
+        )
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        ctx.proposed_state.state_details.deployment_concurrency_lease_id = None
+
+        transform = PreserveDeploymentConcurrencyLeaseId(
+            ctx, StateType.PENDING, StateType.RUNNING
+        )
+        async with transform as ctx:
+            pass
+
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id == lease_id
+        )
+
+    async def test_preserves_before_other_transforms(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Policy ordering: preserve before other rules see state."""
+        lease_id = uuid4()
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            StateType.PENDING,
+            StateType.PENDING,
+            initial_state_name="Pending",
+            proposed_state_name="Submitting",
+        )
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        ctx.proposed_state.state_details.deployment_concurrency_lease_id = None
+
+        # Preserve runs first
+        preserve = PreserveDeploymentConcurrencyLeaseId(
+            ctx, StateType.PENDING, StateType.PENDING
+        )
+        async with preserve as ctx:
+            pass
+
+        # Then PreventPendingTransitions should see the preserved lease
+        prevent = PreventPendingTransitions(ctx, StateType.PENDING, StateType.PENDING)
+        async with prevent as ctx:
+            await ctx.validate_proposed_state()
+
+        assert ctx.response_status == SetStateStatus.ACCEPT
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id == lease_id
+        )
+
+    async def test_works_with_old_client_versions(
+        self,
+        session,
+        initialize_orchestration,
+    ):
+        """Old client compatibility: preserve works with old client versions."""
+        lease_id = uuid4()
+        ctx = await initialize_orchestration(
+            session,
+            "flow",
+            StateType.PENDING,
+            StateType.RUNNING,
+            client_version="0.1.0",  # Old client
+        )
+        ctx.initial_state.state_details.deployment_concurrency_lease_id = lease_id
+        ctx.proposed_state.state_details.deployment_concurrency_lease_id = None
+
+        transform = PreserveDeploymentConcurrencyLeaseId(
+            ctx, StateType.PENDING, StateType.RUNNING
+        )
+        async with transform as ctx:
+            pass
+
+        assert (
+            ctx.proposed_state.state_details.deployment_concurrency_lease_id == lease_id
+        )

@@ -1,5 +1,1275 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`property.type > array > base 1`] = `
+<div>
+  <div
+    class="flex flex-col gap-4"
+  >
+    <div
+      class="flex flex-col gap-4"
+    >
+      <div
+        class="flex flex-col gap-2 group"
+      >
+        <div
+          class="grid grid-cols-[1fr_auto] items-center gap-2"
+        >
+          <div
+            class="flex flex-col gap-1"
+          >
+            <label
+              class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
+              data-slot="label"
+              for="generated-id-0"
+            >
+              list (Optional)
+            </label>
+          </div>
+          <div
+            class="ml-auto"
+          >
+            <button
+              aria-expanded="false"
+              aria-haspopup="menu"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+              data-open="false"
+              data-slot="dropdown-menu-trigger"
+              data-state="closed"
+              id="generated-id-1"
+              type="button"
+            >
+              <span
+                class="sr-only"
+              >
+                Open menu
+              </span>
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-ellipsis-vertical size-4"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="5"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="19"
+                  r="1"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <fieldset>
+          <div
+            class="bg-card text-card-foreground rounded-xl border shadow-sm flex flex-col gap-2 p-2"
+            data-slot="card"
+          >
+            <p
+              class="text-sm text-subdued italic"
+            >
+              No items in this list
+            </p>
+            <div
+              id="DndDescribedBy-0"
+              style="display: none;"
+            >
+              
+    To pick up a draggable item, press the space bar.
+    While dragging, use the arrow keys to move the item.
+    Press space again to drop the item in its new position, or press escape to cancel.
+  
+            </div>
+            <div
+              aria-atomic="true"
+              aria-live="assertive"
+              id="DndLiveRegion-0"
+              role="status"
+              style="position: fixed; top: 0px; left: 0px; width: 1px; height: 1px; margin: -1px; border: 0px; padding: 0px; overflow: hidden; clip: rect(0px); clip-path: inset(100%); white-space: nowrap;"
+            />
+            <div
+              class="flex justify-end"
+            >
+              <button
+                class="inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                type="button"
+              >
+                Add item
+              </button>
+            </div>
+          </div>
+        </fieldset>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`property.type > array > with enum items 1`] = `
+<div>
+  <div
+    class="flex flex-col gap-4"
+  >
+    <div
+      class="flex flex-col gap-4"
+    >
+      <div
+        class="flex flex-col gap-2 group"
+      >
+        <div
+          class="grid grid-cols-[1fr_auto] items-center gap-2"
+        >
+          <div
+            class="flex flex-col gap-1"
+          >
+            <label
+              class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
+              data-slot="label"
+              for="generated-id-0"
+            >
+              list (Optional)
+            </label>
+          </div>
+          <div
+            class="ml-auto"
+          >
+            <button
+              aria-expanded="false"
+              aria-haspopup="menu"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+              data-open="false"
+              data-slot="dropdown-menu-trigger"
+              data-state="closed"
+              id="generated-id-1"
+              type="button"
+            >
+              <span
+                class="sr-only"
+              >
+                Open menu
+              </span>
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-ellipsis-vertical size-4"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="5"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="19"
+                  r="1"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <fieldset>
+          <div
+            class="flex flex-col gap-1"
+          >
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
+            >
+              Select
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+            <div
+              class="flex flex-wrap gap-1"
+            >
+              <span
+                class="inline-flex items-center justify-center rounded-md border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 [&>svg]:size-3 gap-1 [&>svg]:pointer-events-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive transition-[color,box-shadow] overflow-hidden border-transparent bg-primary text-primary-foreground [a&]:hover:bg-primary/90 ml-1 max-w-40"
+                data-slot="badge"
+                title="foo"
+              >
+                <span
+                  class="truncate"
+                >
+                  foo
+                </span>
+                <button
+                  aria-label="Remove foo tag"
+                  class="text-muted-foreground hover:text-foreground rounded-sm focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                  type="button"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="lucide lucide-x"
+                    fill="none"
+                    height="14"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="14"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M18 6 6 18"
+                    />
+                    <path
+                      d="m6 6 12 12"
+                    />
+                  </svg>
+                </button>
+              </span>
+              <span
+                class="inline-flex items-center justify-center rounded-md border px-2 py-0.5 text-xs font-medium w-fit whitespace-nowrap shrink-0 [&>svg]:size-3 gap-1 [&>svg]:pointer-events-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive transition-[color,box-shadow] overflow-hidden border-transparent bg-primary text-primary-foreground [a&]:hover:bg-primary/90 ml-1 max-w-40"
+                data-slot="badge"
+                title="bar"
+              >
+                <span
+                  class="truncate"
+                >
+                  bar
+                </span>
+                <button
+                  aria-label="Remove bar tag"
+                  class="text-muted-foreground hover:text-foreground rounded-sm focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                  type="button"
+                >
+                  <svg
+                    aria-hidden="true"
+                    class="lucide lucide-x"
+                    fill="none"
+                    height="14"
+                    stroke="currentColor"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    stroke-width="2"
+                    viewBox="0 0 24 24"
+                    width="14"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      d="M18 6 6 18"
+                    />
+                    <path
+                      d="m6 6 12 12"
+                    />
+                  </svg>
+                </button>
+              </span>
+            </div>
+          </div>
+        </fieldset>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`property.type > array > with prefixItems - no drag handles on prefix items 1`] = `
+<div>
+  <div
+    class="flex flex-col gap-4"
+  >
+    <div
+      class="flex flex-col gap-4"
+    >
+      <div
+        class="flex flex-col gap-2 group"
+      >
+        <div
+          class="grid grid-cols-[1fr_auto] items-center gap-2"
+        >
+          <div
+            class="flex flex-col gap-1"
+          >
+            <label
+              class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
+              data-slot="label"
+              for="generated-id-0"
+            >
+              list (Optional)
+            </label>
+          </div>
+          <div
+            class="ml-auto"
+          >
+            <button
+              aria-expanded="false"
+              aria-haspopup="menu"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+              data-open="false"
+              data-slot="dropdown-menu-trigger"
+              data-state="closed"
+              id="generated-id-1"
+              type="button"
+            >
+              <span
+                class="sr-only"
+              >
+                Open menu
+              </span>
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-ellipsis-vertical size-4"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="5"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="19"
+                  r="1"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <fieldset>
+          <div
+            class="bg-card text-card-foreground rounded-xl border shadow-sm flex flex-col gap-2 p-2"
+            data-slot="card"
+          >
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <div
+                class="w-5"
+              />
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-2"
+                  rows="1"
+                >
+                  prefix1
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-3"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <div
+                class="w-5"
+              />
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <button
+                  aria-checked="true"
+                  class="peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
+                  data-slot="switch"
+                  data-state="checked"
+                  id="generated-id-4"
+                  role="switch"
+                  type="button"
+                  value="on"
+                >
+                  <span
+                    class="bg-background dark:data-[state=unchecked]:bg-foreground dark:data-[state=checked]:bg-primary-foreground pointer-events-none block size-4 rounded-full ring-0 transition-transform data-[state=checked]:translate-x-[calc(100%-2px)] data-[state=unchecked]:translate-x-0"
+                    data-slot="switch-thumb"
+                    data-state="checked"
+                  />
+                </button>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-5"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <button
+                aria-describedby="DndDescribedBy-2"
+                aria-disabled="false"
+                aria-label="Drag to reorder"
+                aria-roledescription="sortable"
+                class="flex items-center justify-center cursor-grab text-muted-foreground hover:text-foreground focus:outline-none"
+                role="button"
+                tabindex="0"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-grip-vertical h-5 w-5"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="9"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="19"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-6"
+                  rows="1"
+                >
+                  regular1
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-7"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <button
+                aria-describedby="DndDescribedBy-2"
+                aria-disabled="false"
+                aria-label="Drag to reorder"
+                aria-roledescription="sortable"
+                class="flex items-center justify-center cursor-grab text-muted-foreground hover:text-foreground focus:outline-none"
+                role="button"
+                tabindex="0"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-grip-vertical h-5 w-5"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="9"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="19"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-8"
+                  rows="1"
+                >
+                  regular2
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-9"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              id="DndDescribedBy-2"
+              style="display: none;"
+            >
+              
+    To pick up a draggable item, press the space bar.
+    While dragging, use the arrow keys to move the item.
+    Press space again to drop the item in its new position, or press escape to cancel.
+  
+            </div>
+            <div
+              aria-atomic="true"
+              aria-live="assertive"
+              id="DndLiveRegion-2"
+              role="status"
+              style="position: fixed; top: 0px; left: 0px; width: 1px; height: 1px; margin: -1px; border: 0px; padding: 0px; overflow: hidden; clip: rect(0px); clip-path: inset(100%); white-space: nowrap;"
+            />
+            <div
+              class="flex justify-end"
+            >
+              <button
+                class="inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                type="button"
+              >
+                Add item
+              </button>
+            </div>
+          </div>
+        </fieldset>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
+exports[`property.type > array > with values - drag handles visible 1`] = `
+<div>
+  <div
+    class="flex flex-col gap-4"
+  >
+    <div
+      class="flex flex-col gap-4"
+    >
+      <div
+        class="flex flex-col gap-2 group"
+      >
+        <div
+          class="grid grid-cols-[1fr_auto] items-center gap-2"
+        >
+          <div
+            class="flex flex-col gap-1"
+          >
+            <label
+              class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
+              data-slot="label"
+              for="generated-id-0"
+            >
+              list (Optional)
+            </label>
+          </div>
+          <div
+            class="ml-auto"
+          >
+            <button
+              aria-expanded="false"
+              aria-haspopup="menu"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+              data-open="false"
+              data-slot="dropdown-menu-trigger"
+              data-state="closed"
+              id="generated-id-1"
+              type="button"
+            >
+              <span
+                class="sr-only"
+              >
+                Open menu
+              </span>
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-ellipsis-vertical size-4"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="5"
+                  r="1"
+                />
+                <circle
+                  cx="12"
+                  cy="19"
+                  r="1"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <fieldset>
+          <div
+            class="bg-card text-card-foreground rounded-xl border shadow-sm flex flex-col gap-2 p-2"
+            data-slot="card"
+          >
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <button
+                aria-describedby="DndDescribedBy-1"
+                aria-disabled="false"
+                aria-label="Drag to reorder"
+                aria-roledescription="sortable"
+                class="flex items-center justify-center cursor-grab text-muted-foreground hover:text-foreground focus:outline-none"
+                role="button"
+                tabindex="0"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-grip-vertical h-5 w-5"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="9"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="19"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-2"
+                  rows="1"
+                >
+                  foo
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-3"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <button
+                aria-describedby="DndDescribedBy-1"
+                aria-disabled="false"
+                aria-label="Drag to reorder"
+                aria-roledescription="sortable"
+                class="flex items-center justify-center cursor-grab text-muted-foreground hover:text-foreground focus:outline-none"
+                role="button"
+                tabindex="0"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-grip-vertical h-5 w-5"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="9"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="19"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-4"
+                  rows="1"
+                >
+                  bar
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-5"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              class="grid grid-cols-[auto_1fr_auto] gap-2"
+              style="opacity: 1; transition: transform 0ms linear;"
+            >
+              <button
+                aria-describedby="DndDescribedBy-1"
+                aria-disabled="false"
+                aria-label="Drag to reorder"
+                aria-roledescription="sortable"
+                class="flex items-center justify-center cursor-grab text-muted-foreground hover:text-foreground focus:outline-none"
+                role="button"
+                tabindex="0"
+                type="button"
+              >
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-grip-vertical h-5 w-5"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="9"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="9"
+                    cy="19"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="15"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+              <div
+                class="grid grid-cols-1 gap-2"
+              >
+                <textarea
+                  class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
+                  data-slot="textarea"
+                  id="generated-id-6"
+                  rows="1"
+                >
+                  baz
+                </textarea>
+              </div>
+              <button
+                aria-expanded="false"
+                aria-haspopup="menu"
+                class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
+                data-open="false"
+                data-slot="dropdown-menu-trigger"
+                data-state="closed"
+                id="generated-id-7"
+                type="button"
+              >
+                <span
+                  class="sr-only"
+                >
+                  Open menu
+                </span>
+                <svg
+                  aria-hidden="true"
+                  class="lucide lucide-ellipsis-vertical size-4"
+                  fill="none"
+                  height="24"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                  width="24"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="5"
+                    r="1"
+                  />
+                  <circle
+                    cx="12"
+                    cy="19"
+                    r="1"
+                  />
+                </svg>
+              </button>
+            </div>
+            <div
+              id="DndDescribedBy-1"
+              style="display: none;"
+            >
+              
+    To pick up a draggable item, press the space bar.
+    While dragging, use the arrow keys to move the item.
+    Press space again to drop the item in its new position, or press escape to cancel.
+  
+            </div>
+            <div
+              aria-atomic="true"
+              aria-live="assertive"
+              id="DndLiveRegion-1"
+              role="status"
+              style="position: fixed; top: 0px; left: 0px; width: 1px; height: 1px; margin: -1px; border: 0px; padding: 0px; overflow: hidden; clip: rect(0px); clip-path: inset(100%); white-space: nowrap;"
+            />
+            <div
+              class="flex justify-end"
+            >
+              <button
+                class="inline-flex items-center justify-center whitespace-nowrap font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-8 rounded-md px-3 text-xs"
+                type="button"
+              >
+                Add item
+              </button>
+            </div>
+          </div>
+        </fieldset>
+      </div>
+    </div>
+  </div>
+</div>
+`;
+
 exports[`property.type > boolean > base 1`] = `
 <div>
   <div
@@ -20,7 +1290,7 @@ exports[`property.type > boolean > base 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2g»"
+              for="generated-id-0"
             >
               bool (Optional)
             </label>
@@ -31,11 +1301,11 @@ exports[`property.type > boolean > base 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2h»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -81,7 +1351,7 @@ exports[`property.type > boolean > base 1`] = `
             class="peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
             data-slot="switch"
             data-state="unchecked"
-            id="«r2g»"
+            id="generated-id-0"
             role="switch"
             type="button"
             value="on"
@@ -119,7 +1389,7 @@ exports[`property.type > boolean > enum 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2p»"
+              for="generated-id-0"
             >
               bool (Optional)
             </label>
@@ -130,11 +1400,11 @@ exports[`property.type > boolean > enum 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2q»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -175,39 +1445,42 @@ exports[`property.type > boolean > enum 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r2s»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r2p»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            Select
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              Select
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -235,7 +1508,7 @@ exports[`property.type > boolean > with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2m»"
+              for="generated-id-0"
             >
               bool (Optional)
             </label>
@@ -246,11 +1519,11 @@ exports[`property.type > boolean > with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2n»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -296,7 +1569,7 @@ exports[`property.type > boolean > with default 1`] = `
             class="peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
             data-slot="switch"
             data-state="checked"
-            id="«r2m»"
+            id="generated-id-0"
             role="switch"
             type="button"
             value="on"
@@ -334,7 +1607,7 @@ exports[`property.type > boolean > with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2j»"
+              for="generated-id-0"
             >
               bool (Optional)
             </label>
@@ -345,11 +1618,11 @@ exports[`property.type > boolean > with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2k»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -395,7 +1668,7 @@ exports[`property.type > boolean > with value 1`] = `
             class="peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50"
             data-slot="switch"
             data-state="checked"
-            id="«r2j»"
+            id="generated-id-0"
             role="switch"
             type="button"
             value="on"
@@ -433,7 +1706,7 @@ exports[`property.type > integer > base 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r23»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -444,11 +1717,11 @@ exports[`property.type > integer > base 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r24»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -490,8 +1763,9 @@ exports[`property.type > integer > base 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r23»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value=""
           />
@@ -522,7 +1796,7 @@ exports[`property.type > integer > enum 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2c»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -533,11 +1807,11 @@ exports[`property.type > integer > enum 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2d»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -578,39 +1852,42 @@ exports[`property.type > integer > enum 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r2f»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r2c»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            Select
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              Select
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -638,7 +1915,7 @@ exports[`property.type > integer > with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r29»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -649,11 +1926,11 @@ exports[`property.type > integer > with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2a»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -695,8 +1972,9 @@ exports[`property.type > integer > with default 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r29»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value="123"
           />
@@ -727,7 +2005,7 @@ exports[`property.type > integer > with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r26»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -738,11 +2016,11 @@ exports[`property.type > integer > with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r27»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -784,8 +2062,9 @@ exports[`property.type > integer > with value 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r26»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value="123"
           />
@@ -816,7 +2095,7 @@ exports[`property.type > null > base 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r2t»"
+              for="generated-id-0"
             >
               None (Optional)
             </label>
@@ -827,11 +2106,11 @@ exports[`property.type > null > base 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r2u»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -904,7 +2183,7 @@ exports[`property.type > number > base 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1m»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -915,11 +2194,11 @@ exports[`property.type > number > base 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1n»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -961,8 +2240,9 @@ exports[`property.type > number > base 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r1m»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value=""
           />
@@ -993,7 +2273,7 @@ exports[`property.type > number > enum 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1v»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -1004,11 +2284,11 @@ exports[`property.type > number > enum 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r20»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1049,39 +2329,42 @@ exports[`property.type > number > enum 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r22»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r1v»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            Select
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              Select
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -1109,7 +2392,7 @@ exports[`property.type > number > with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1s»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -1120,11 +2403,11 @@ exports[`property.type > number > with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1t»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1166,8 +2449,9 @@ exports[`property.type > number > with default 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r1s»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value="123.45"
           />
@@ -1198,7 +2482,7 @@ exports[`property.type > number > with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1p»"
+              for="generated-id-0"
             >
               float (Optional)
             </label>
@@ -1209,11 +2493,11 @@ exports[`property.type > number > with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1q»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1255,8 +2539,9 @@ exports[`property.type > number > with value 1`] = `
         </div>
         <fieldset>
           <input
-            class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-            id="«r1p»"
+            class="flex h-9 w-full rounded-md border border-input bg-card dark:bg-background px-3 py-1 text-sm shadow-xs transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium file:text-foreground placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+            id="generated-id-0"
+            step="any"
             type="number"
             value="123.45"
           />
@@ -1287,7 +2572,7 @@ exports[`property.type > string >  1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r0»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -1298,11 +2583,11 @@ exports[`property.type > string >  1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1346,7 +2631,7 @@ exports[`property.type > string >  1`] = `
           <textarea
             class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
             data-slot="textarea"
-            id="«r0»"
+            id="generated-id-0"
             rows="1"
           />
         </fieldset>
@@ -1376,7 +2661,7 @@ exports[`property.type > string > enum 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1a»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -1387,11 +2672,11 @@ exports[`property.type > string > enum 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1b»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1432,39 +2717,42 @@ exports[`property.type > string > enum 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r1d»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r1a»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            Select
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              Select
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -1492,7 +2780,7 @@ exports[`property.type > string > enum with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1i»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -1503,11 +2791,11 @@ exports[`property.type > string > enum with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1j»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1548,39 +2836,42 @@ exports[`property.type > string > enum with default 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r1l»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between text-muted-foreground"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r1i»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            foo
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              foo
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -1608,7 +2899,7 @@ exports[`property.type > string > enum with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r1e»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -1619,11 +2910,11 @@ exports[`property.type > string > enum with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r1f»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1664,39 +2955,42 @@ exports[`property.type > string > enum with value 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r1h»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between text-muted-foreground"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r1e»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            foo
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              foo
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -1724,7 +3018,7 @@ exports[`property.type > string > format:date 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r9»"
+              for="generated-id-0"
             >
               date (Optional)
             </label>
@@ -1735,11 +3029,11 @@ exports[`property.type > string > format:date 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«ra»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1781,13 +3075,12 @@ exports[`property.type > string > format:date 1`] = `
         </div>
         <fieldset>
           <button
-            aria-controls="radix-«rc»"
             aria-expanded="false"
             aria-haspopup="dialog"
             class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 justify-start text-left font-normal w-full text-muted-foreground"
             data-slot="popover-trigger"
             data-state="closed"
-            id="«r9»"
+            id="generated-id-0"
             type="button"
           >
             <svg
@@ -1804,20 +3097,20 @@ exports[`property.type > string > format:date 1`] = `
               xmlns="http://www.w3.org/2000/svg"
             >
               <path
-                d="M8 2v4"
+                d="M8 2v3"
               />
               <path
-                d="M16 2v4"
+                d="M16 2v3"
               />
               <rect
                 height="18"
                 rx="2"
                 width="18"
                 x="3"
-                y="4"
+                y="3"
               />
               <path
-                d="M3 10h18"
+                d="M3 9h18"
               />
             </svg>
             <span>
@@ -1851,7 +3144,7 @@ exports[`property.type > string > format:date with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«rh»"
+              for="generated-id-0"
             >
               date (Optional)
             </label>
@@ -1862,11 +3155,11 @@ exports[`property.type > string > format:date with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«ri»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -1908,13 +3201,12 @@ exports[`property.type > string > format:date with default 1`] = `
         </div>
         <fieldset>
           <button
-            aria-controls="radix-«rk»"
             aria-expanded="false"
             aria-haspopup="dialog"
             class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 justify-start text-left font-normal w-full"
             data-slot="popover-trigger"
             data-state="closed"
-            id="«rh»"
+            id="generated-id-0"
             type="button"
           >
             <svg
@@ -1931,20 +3223,20 @@ exports[`property.type > string > format:date with default 1`] = `
               xmlns="http://www.w3.org/2000/svg"
             >
               <path
-                d="M8 2v4"
+                d="M8 2v3"
               />
               <path
-                d="M16 2v4"
+                d="M16 2v3"
               />
               <rect
                 height="18"
                 rx="2"
                 width="18"
                 x="3"
-                y="4"
+                y="3"
               />
               <path
-                d="M3 10h18"
+                d="M3 9h18"
               />
             </svg>
             January 1st, 2024
@@ -1976,7 +3268,7 @@ exports[`property.type > string > format:date with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«rd»"
+              for="generated-id-0"
             >
               date (Optional)
             </label>
@@ -1987,11 +3279,11 @@ exports[`property.type > string > format:date with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«re»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2033,13 +3325,12 @@ exports[`property.type > string > format:date with value 1`] = `
         </div>
         <fieldset>
           <button
-            aria-controls="radix-«rg»"
             aria-expanded="false"
             aria-haspopup="dialog"
             class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 justify-start text-left font-normal w-full"
             data-slot="popover-trigger"
             data-state="closed"
-            id="«rd»"
+            id="generated-id-0"
             type="button"
           >
             <svg
@@ -2056,20 +3347,20 @@ exports[`property.type > string > format:date with value 1`] = `
               xmlns="http://www.w3.org/2000/svg"
             >
               <path
-                d="M8 2v4"
+                d="M8 2v3"
               />
               <path
-                d="M16 2v4"
+                d="M16 2v3"
               />
               <rect
                 height="18"
                 rx="2"
                 width="18"
                 x="3"
-                y="4"
+                y="3"
               />
               <path
-                d="M3 10h18"
+                d="M3 9h18"
               />
             </svg>
             January 1st, 2024
@@ -2101,7 +3392,7 @@ exports[`property.type > string > format:date-time 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«rl»"
+              for="generated-id-0"
             >
               date-time (Optional)
             </label>
@@ -2112,11 +3403,11 @@ exports[`property.type > string > format:date-time 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«rm»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2157,35 +3448,69 @@ exports[`property.type > string > format:date-time 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«ro»"
-            aria-expanded="false"
-            aria-haspopup="dialog"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal text-muted-foreground"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«rl»"
-            type="button"
+          <div
+            class="flex flex-col gap-2"
           >
-            <svg
-              class="mr-2 h-4 w-4"
-              fill="none"
-              height="15"
-              viewBox="0 0 15 15"
-              width="15"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="dialog"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                clip-rule="evenodd"
-                d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
-                fill="currentColor"
-                fill-rule="evenodd"
-              />
-            </svg>
-            <span>
-              MM/DD/YYYY hh:mm aa
-            </span>
-          </button>
+              <svg
+                class="mr-2 h-4 w-4"
+                fill="none"
+                height="15"
+                viewBox="0 0 15 15"
+                width="15"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  clip-rule="evenodd"
+                  d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
+                  fill="currentColor"
+                  fill-rule="evenodd"
+                />
+              </svg>
+              <span>
+                MM/DD/YYYY hh:mm aa
+              </span>
+            </button>
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select timezone"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              type="button"
+            >
+              UTC
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -2213,7 +3538,7 @@ exports[`property.type > string > format:date-time with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«rt»"
+              for="generated-id-0"
             >
               date-time (Optional)
             </label>
@@ -2224,11 +3549,11 @@ exports[`property.type > string > format:date-time with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«ru»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2269,33 +3594,67 @@ exports[`property.type > string > format:date-time with default 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r10»"
-            aria-expanded="false"
-            aria-haspopup="dialog"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«rt»"
-            type="button"
+          <div
+            class="flex flex-col gap-2"
           >
-            <svg
-              class="mr-2 h-4 w-4"
-              fill="none"
-              height="15"
-              viewBox="0 0 15 15"
-              width="15"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="dialog"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                clip-rule="evenodd"
-                d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
-                fill="currentColor"
-                fill-rule="evenodd"
-              />
-            </svg>
-            01/01/2024 12:00 AM
-          </button>
+              <svg
+                class="mr-2 h-4 w-4"
+                fill="none"
+                height="15"
+                viewBox="0 0 15 15"
+                width="15"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  clip-rule="evenodd"
+                  d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
+                  fill="currentColor"
+                  fill-rule="evenodd"
+                />
+              </svg>
+              01/01/2024 12:00 AM
+            </button>
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select timezone"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              type="button"
+            >
+              UTC
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -2323,7 +3682,7 @@ exports[`property.type > string > format:date-time with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«rp»"
+              for="generated-id-0"
             >
               date-time (Optional)
             </label>
@@ -2334,11 +3693,11 @@ exports[`property.type > string > format:date-time with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«rq»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2379,33 +3738,67 @@ exports[`property.type > string > format:date-time with value 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«rs»"
-            aria-expanded="false"
-            aria-haspopup="dialog"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«rp»"
-            type="button"
+          <div
+            class="flex flex-col gap-2"
           >
-            <svg
-              class="mr-2 h-4 w-4"
-              fill="none"
-              height="15"
-              viewBox="0 0 15 15"
-              width="15"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="dialog"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-start text-left font-normal bg-card dark:bg-background"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                clip-rule="evenodd"
-                d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
-                fill="currentColor"
-                fill-rule="evenodd"
-              />
-            </svg>
-            01/01/2024 12:00 AM
-          </button>
+              <svg
+                class="mr-2 h-4 w-4"
+                fill="none"
+                height="15"
+                viewBox="0 0 15 15"
+                width="15"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  clip-rule="evenodd"
+                  d="M4.5 1C4.77614 1 5 1.22386 5 1.5V2H10V1.5C10 1.22386 10.2239 1 10.5 1C10.7761 1 11 1.22386 11 1.5V2H12.5C13.3284 2 14 2.67157 14 3.5V12.5C14 13.3284 13.3284 14 12.5 14H2.5C1.67157 14 1 13.3284 1 12.5V3.5C1 2.67157 1.67157 2 2.5 2H4V1.5C4 1.22386 4.22386 1 4.5 1ZM10 3V3.5C10 3.77614 10.2239 4 10.5 4C10.7761 4 11 3.77614 11 3.5V3H12.5C12.7761 3 13 3.22386 13 3.5V5H2V3.5C2 3.22386 2.22386 3 2.5 3H4V3.5C4 3.77614 4.22386 4 4.5 4C4.77614 4 5 3.77614 5 3.5V3H10ZM2 6V12.5C2 12.7761 2.22386 13 2.5 13H12.5C12.7761 13 13 12.7761 13 12.5V6H2ZM7 7.5C7 7.22386 7.22386 7 7.5 7C7.77614 7 8 7.22386 8 7.5C8 7.77614 7.77614 8 7.5 8C7.22386 8 7 7.77614 7 7.5ZM9.5 7C9.22386 7 9 7.22386 9 7.5C9 7.77614 9.22386 8 9.5 8C9.77614 8 10 7.77614 10 7.5C10 7.22386 9.77614 7 9.5 7ZM11 7.5C11 7.22386 11.2239 7 11.5 7C11.7761 7 12 7.22386 12 7.5C12 7.77614 11.7761 8 11.5 8C11.2239 8 11 7.77614 11 7.5ZM11.5 9C11.2239 9 11 9.22386 11 9.5C11 9.77614 11.2239 10 11.5 10C11.7761 10 12 9.77614 12 9.5C12 9.22386 11.7761 9 11.5 9ZM9 9.5C9 9.22386 9.22386 9 9.5 9C9.77614 9 10 9.22386 10 9.5C10 9.77614 9.77614 10 9.5 10C9.22386 10 9 9.77614 9 9.5ZM7.5 9C7.22386 9 7 9.22386 7 9.5C7 9.77614 7.22386 10 7.5 10C7.77614 10 8 9.77614 8 9.5C8 9.22386 7.77614 9 7.5 9ZM5 9.5C5 9.22386 5.22386 9 5.5 9C5.77614 9 6 9.22386 6 9.5C6 9.77614 5.77614 10 5.5 10C5.22386 10 5 9.77614 5 9.5ZM3.5 9C3.22386 9 3 9.22386 3 9.5C3 9.77614 3.22386 10 3.5 10C3.77614 10 4 9.77614 4 9.5C4 9.22386 3.77614 9 3.5 9ZM3 11.5C3 11.2239 3.22386 11 3.5 11C3.77614 11 4 11.2239 4 11.5C4 11.7761 3.77614 12 3.5 12C3.22386 12 3 11.7761 3 11.5ZM5.5 11C5.22386 11 5 11.2239 5 11.5C5 11.7761 5.22386 12 5.5 12C5.77614 12 6 11.7761 6 11.5C6 11.2239 5.77614 11 5.5 11ZM7 11.5C7 11.2239 7.22386 11 7.5 11C7.77614 11 8 11.2239 8 11.5C8 11.7761 7.77614 12 7.5 12C7.22386 12 7 11.7761 7 11.5ZM9.5 11C9.22386 11 9 11.2239 9 11.5C9 11.7761 9.22386 12 9.5 12C9.77614 12 10 11.7761 10 11.5C10 11.2239 9.77614 11 9.5 11Z"
+                  fill="currentColor"
+                  fill-rule="evenodd"
+                />
+              </svg>
+              01/01/2024 12:00 AM
+            </button>
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select timezone"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              type="button"
+            >
+              UTC
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>
@@ -2433,7 +3826,7 @@ exports[`property.type > string > format:json-string 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r11»"
+              for="generated-id-0"
             >
               json-string (Optional)
             </label>
@@ -2444,11 +3837,11 @@ exports[`property.type > string > format:json-string 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r12»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2489,92 +3882,9 @@ exports[`property.type > string > format:json-string 1`] = `
           </div>
         </div>
         <fieldset>
-          <div
-            class="rounded-md border shadow-xs overflow-hidden focus-within:outline-hidden focus-within:ring-1 focus-within:ring-ring relative"
-            id="«r11»"
-          >
-            <div
-              class="cm-editor ͼ1 ͼ2 ͼ4 ͼ17 ͼ15"
-            >
-              <div
-                aria-live="polite"
-                class="cm-announced"
-              />
-              <div
-                class="cm-scroller"
-                tabindex="-1"
-              >
-                <div
-                  aria-hidden="true"
-                  class="cm-gutters"
-                  style="min-height: 14px; position: sticky;"
-                >
-                  <div
-                    class="cm-gutter cm-lineNumbers"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      9
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    >
-                      1
-                    </div>
-                  </div>
-                  <div
-                    class="cm-gutter cm-foldGutter"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      <span
-                        title="Unfold line"
-                      >
-                        ›
-                      </span>
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    />
-                  </div>
-                </div>
-                <div
-                  aria-multiline="true"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  class="cm-content cm-lineWrapping"
-                  contenteditable="true"
-                  data-language="json"
-                  role="textbox"
-                  spellcheck="false"
-                  style="tab-size: 4;"
-                  translate="no"
-                >
-                  <div
-                    class="cm-activeLine cm-line"
-                  >
-                    <br />
-                  </div>
-                </div>
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-layer-above cm-cursorLayer"
-                  style="z-index: 150; animation-duration: 1200ms;"
-                />
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-selectionLayer"
-                  style="z-index: -2;"
-                />
-              </div>
-            </div>
-          </div>
+          <textarea
+            data-testid="mock-json-input"
+          />
         </fieldset>
       </div>
     </div>
@@ -2602,7 +3912,7 @@ exports[`property.type > string > format:json-string with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r17»"
+              for="generated-id-0"
             >
               json-string (Optional)
             </label>
@@ -2613,11 +3923,11 @@ exports[`property.type > string > format:json-string with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r18»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2658,98 +3968,11 @@ exports[`property.type > string > format:json-string with default 1`] = `
           </div>
         </div>
         <fieldset>
-          <div
-            class="rounded-md border shadow-xs overflow-hidden focus-within:outline-hidden focus-within:ring-1 focus-within:ring-ring relative"
-            id="«r17»"
+          <textarea
+            data-testid="mock-json-input"
           >
-            <div
-              class="cm-editor ͼ1 ͼ2 ͼ4 ͼ1d ͼ15"
-            >
-              <div
-                aria-live="polite"
-                class="cm-announced"
-              />
-              <div
-                class="cm-scroller"
-                tabindex="-1"
-              >
-                <div
-                  aria-hidden="true"
-                  class="cm-gutters"
-                  style="min-height: 14px; position: sticky;"
-                >
-                  <div
-                    class="cm-gutter cm-lineNumbers"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      9
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    >
-                      1
-                    </div>
-                  </div>
-                  <div
-                    class="cm-gutter cm-foldGutter"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      <span
-                        title="Unfold line"
-                      >
-                        ›
-                      </span>
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    />
-                  </div>
-                </div>
-                <div
-                  aria-multiline="true"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  class="cm-content cm-lineWrapping"
-                  contenteditable="true"
-                  data-language="json"
-                  role="textbox"
-                  spellcheck="false"
-                  style="tab-size: 4;"
-                  translate="no"
-                >
-                  <div
-                    class="cm-activeLine cm-line"
-                  >
-                    {"foo": 
-                    <span
-                      class="ͼe"
-                    >
-                      "bar"
-                    </span>
-                    }
-                  </div>
-                </div>
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-layer-above cm-cursorLayer"
-                  style="z-index: 150; animation-duration: 1200ms;"
-                />
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-selectionLayer"
-                  style="z-index: -2;"
-                />
-              </div>
-            </div>
-          </div>
+            {"foo": "bar"}
+          </textarea>
         </fieldset>
       </div>
     </div>
@@ -2777,7 +4000,7 @@ exports[`property.type > string > format:json-string with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r14»"
+              for="generated-id-0"
             >
               json-string (Optional)
             </label>
@@ -2788,11 +4011,11 @@ exports[`property.type > string > format:json-string with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r15»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -2833,98 +4056,11 @@ exports[`property.type > string > format:json-string with value 1`] = `
           </div>
         </div>
         <fieldset>
-          <div
-            class="rounded-md border shadow-xs overflow-hidden focus-within:outline-hidden focus-within:ring-1 focus-within:ring-ring relative"
-            id="«r14»"
+          <textarea
+            data-testid="mock-json-input"
           >
-            <div
-              class="cm-editor ͼ1 ͼ2 ͼ4 ͼ1a ͼ15"
-            >
-              <div
-                aria-live="polite"
-                class="cm-announced"
-              />
-              <div
-                class="cm-scroller"
-                tabindex="-1"
-              >
-                <div
-                  aria-hidden="true"
-                  class="cm-gutters"
-                  style="min-height: 14px; position: sticky;"
-                >
-                  <div
-                    class="cm-gutter cm-lineNumbers"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      9
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    >
-                      1
-                    </div>
-                  </div>
-                  <div
-                    class="cm-gutter cm-foldGutter"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      <span
-                        title="Unfold line"
-                      >
-                        ›
-                      </span>
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    />
-                  </div>
-                </div>
-                <div
-                  aria-multiline="true"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  class="cm-content cm-lineWrapping"
-                  contenteditable="true"
-                  data-language="json"
-                  role="textbox"
-                  spellcheck="false"
-                  style="tab-size: 4;"
-                  translate="no"
-                >
-                  <div
-                    class="cm-activeLine cm-line"
-                  >
-                    {"foo": 
-                    <span
-                      class="ͼe"
-                    >
-                      "bar"
-                    </span>
-                    }
-                  </div>
-                </div>
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-layer-above cm-cursorLayer"
-                  style="z-index: 150; animation-duration: 1200ms;"
-                />
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-selectionLayer"
-                  style="z-index: -2;"
-                />
-              </div>
-            </div>
-          </div>
+            {"foo": "bar"}
+          </textarea>
         </fieldset>
       </div>
     </div>
@@ -2952,7 +4088,7 @@ exports[`property.type > string > with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r6»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -2963,11 +4099,11 @@ exports[`property.type > string > with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r7»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -3011,7 +4147,7 @@ exports[`property.type > string > with default 1`] = `
           <textarea
             class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
             data-slot="textarea"
-            id="«r6»"
+            id="generated-id-0"
             rows="1"
           >
             foo
@@ -3043,7 +4179,7 @@ exports[`property.type > string > with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r3»"
+              for="generated-id-0"
             >
               str (Optional)
             </label>
@@ -3054,11 +4190,11 @@ exports[`property.type > string > with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r4»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -3102,7 +4238,7 @@ exports[`property.type > string > with value 1`] = `
           <textarea
             class="border-input placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive flex field-sizing-content w-full rounded-md border bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50 md:text-sm min-h-min"
             data-slot="textarea"
-            id="«r3»"
+            id="generated-id-0"
             rows="1"
           >
             foo
@@ -3134,7 +4270,7 @@ exports[`property.type > unknown > base 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r30»"
+              for="generated-id-0"
             >
               Field (Optional)
             </label>
@@ -3145,11 +4281,11 @@ exports[`property.type > unknown > base 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r31»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -3190,92 +4326,9 @@ exports[`property.type > unknown > base 1`] = `
           </div>
         </div>
         <fieldset>
-          <div
-            class="rounded-md border shadow-xs overflow-hidden focus-within:outline-hidden focus-within:ring-1 focus-within:ring-ring relative"
-            id="«r30»"
-          >
-            <div
-              class="cm-editor ͼ1 ͼ2 ͼ4 ͼ1g ͼ15"
-            >
-              <div
-                aria-live="polite"
-                class="cm-announced"
-              />
-              <div
-                class="cm-scroller"
-                tabindex="-1"
-              >
-                <div
-                  aria-hidden="true"
-                  class="cm-gutters"
-                  style="min-height: 14px; position: sticky;"
-                >
-                  <div
-                    class="cm-gutter cm-lineNumbers"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      9
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    >
-                      1
-                    </div>
-                  </div>
-                  <div
-                    class="cm-gutter cm-foldGutter"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      <span
-                        title="Unfold line"
-                      >
-                        ›
-                      </span>
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    />
-                  </div>
-                </div>
-                <div
-                  aria-multiline="true"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  class="cm-content cm-lineWrapping"
-                  contenteditable="true"
-                  data-language="json"
-                  role="textbox"
-                  spellcheck="false"
-                  style="tab-size: 4;"
-                  translate="no"
-                >
-                  <div
-                    class="cm-activeLine cm-line"
-                  >
-                    <br />
-                  </div>
-                </div>
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-layer-above cm-cursorLayer"
-                  style="z-index: 150; animation-duration: 1200ms;"
-                />
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-selectionLayer"
-                  style="z-index: -2;"
-                />
-              </div>
-            </div>
-          </div>
+          <textarea
+            data-testid="mock-json-input"
+          />
         </fieldset>
       </div>
     </div>
@@ -3303,7 +4356,7 @@ exports[`property.type > unknown > with default 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r37»"
+              for="generated-id-0"
             >
               Field (Optional)
             </label>
@@ -3314,11 +4367,11 @@ exports[`property.type > unknown > with default 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r38»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -3359,92 +4412,9 @@ exports[`property.type > unknown > with default 1`] = `
           </div>
         </div>
         <fieldset>
-          <div
-            class="rounded-md border shadow-xs overflow-hidden focus-within:outline-hidden focus-within:ring-1 focus-within:ring-ring relative"
-            id="«r37»"
-          >
-            <div
-              class="cm-editor ͼ1 ͼ2 ͼ4 ͼ1j ͼ15"
-            >
-              <div
-                aria-live="polite"
-                class="cm-announced"
-              />
-              <div
-                class="cm-scroller"
-                tabindex="-1"
-              >
-                <div
-                  aria-hidden="true"
-                  class="cm-gutters"
-                  style="min-height: 14px; position: sticky;"
-                >
-                  <div
-                    class="cm-gutter cm-lineNumbers"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      9
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    >
-                      1
-                    </div>
-                  </div>
-                  <div
-                    class="cm-gutter cm-foldGutter"
-                  >
-                    <div
-                      class="cm-gutterElement"
-                      style="height: 0px; visibility: hidden; pointer-events: none;"
-                    >
-                      <span
-                        title="Unfold line"
-                      >
-                        ›
-                      </span>
-                    </div>
-                    <div
-                      class="cm-gutterElement cm-activeLineGutter"
-                      style="height: 14px;"
-                    />
-                  </div>
-                </div>
-                <div
-                  aria-multiline="true"
-                  autocapitalize="off"
-                  autocorrect="off"
-                  class="cm-content cm-lineWrapping"
-                  contenteditable="true"
-                  data-language="json"
-                  role="textbox"
-                  spellcheck="false"
-                  style="tab-size: 4;"
-                  translate="no"
-                >
-                  <div
-                    class="cm-activeLine cm-line"
-                  >
-                    <br />
-                  </div>
-                </div>
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-layer-above cm-cursorLayer"
-                  style="z-index: 150; animation-duration: 1200ms;"
-                />
-                <div
-                  aria-hidden="true"
-                  class="cm-layer cm-selectionLayer"
-                  style="z-index: -2;"
-                />
-              </div>
-            </div>
-          </div>
+          <textarea
+            data-testid="mock-json-input"
+          />
         </fieldset>
       </div>
     </div>
@@ -3472,7 +4442,7 @@ exports[`property.type > unknown > with value 1`] = `
             <label
               class="flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50"
               data-slot="label"
-              for="«r33»"
+              for="generated-id-0"
             >
               Field (Optional)
             </label>
@@ -3483,11 +4453,11 @@ exports[`property.type > unknown > with value 1`] = `
             <button
               aria-expanded="false"
               aria-haspopup="menu"
-              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground h-8 w-8 p-0 opacity-0 transition-opacity disabled:!opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[open=true]:opacity-100"
+              class="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground size-9"
               data-open="false"
               data-slot="dropdown-menu-trigger"
               data-state="closed"
-              id="radix-«r34»"
+              id="generated-id-1"
               type="button"
             >
               <span
@@ -3528,39 +4498,42 @@ exports[`property.type > unknown > with value 1`] = `
           </div>
         </div>
         <fieldset>
-          <button
-            aria-controls="radix-«r36»"
-            aria-expanded="false"
-            aria-haspopup="listbox"
-            aria-label="Select undefined"
-            class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between text-muted-foreground"
-            data-slot="popover-trigger"
-            data-state="closed"
-            id="«r33»"
-            type="button"
+          <div
+            class="flex flex-col gap-1"
           >
-            foo
-            <svg
-              aria-hidden="true"
-              class="lucide lucide-chevrons-up-down size-4 opacity-50"
-              fill="none"
-              height="24"
-              stroke="currentColor"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              stroke-width="2"
-              viewBox="0 0 24 24"
-              width="24"
-              xmlns="http://www.w3.org/2000/svg"
+            <button
+              aria-expanded="false"
+              aria-haspopup="listbox"
+              aria-label="Select undefined"
+              class="inline-flex items-center whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 border border-input shadow-xs hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2 w-full justify-between bg-card dark:bg-background text-muted-foreground"
+              data-slot="popover-trigger"
+              data-state="closed"
+              id="generated-id-0"
+              type="button"
             >
-              <path
-                d="m7 15 5 5 5-5"
-              />
-              <path
-                d="m7 9 5-5 5 5"
-              />
-            </svg>
-          </button>
+              foo
+              <svg
+                aria-hidden="true"
+                class="lucide lucide-chevrons-up-down size-4 opacity-50"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                viewBox="0 0 24 24"
+                width="24"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path
+                  d="m7 15 5 5 5-5"
+                />
+                <path
+                  d="m7 9 5-5 5 5"
+                />
+              </svg>
+            </button>
+          </div>
         </fieldset>
       </div>
     </div>

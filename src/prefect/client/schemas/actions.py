@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import datetime
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union
+from typing import Annotated, Any, Callable, Optional, TypeVar, Union
 from uuid import UUID, uuid4
 
 import jsonschema
+import referencing.exceptions
 from pydantic import (
+    AfterValidator,
     BaseModel,
     Field,
     field_serializer,
@@ -15,9 +17,13 @@ from pydantic import (
 )
 
 import prefect.client.schemas.objects as objects
+from prefect._internal.result_records import ResultRecordMetadata
+from prefect._internal.schema import ParameterSchema
+from prefect._internal.schemas._registry import non_fetching_registry
 from prefect._internal.schemas.bases import ActionBaseModel
 from prefect._internal.schemas.validators import (
     convert_to_strings,
+    normalize_schedule_rrule,
     remove_old_deployment_fields,
     validate_name_present_on_nonanonymous_blocks,
     validate_schedule_max_scheduled_runs,
@@ -47,7 +53,6 @@ from prefect.types import (
     PositiveInteger,
     StrictVariableValue,
 )
-from prefect.types._schema import ParameterSchema
 from prefect.types.names import (
     ArtifactKey,
     BlockDocumentName,
@@ -56,9 +61,6 @@ from prefect.types.names import (
 )
 from prefect.utilities.collections import visit_collection
 from prefect.utilities.pydantic import get_class_fields_only
-
-if TYPE_CHECKING:
-    from prefect._result_records import ResultRecordMetadata
 
 R = TypeVar("R")
 
@@ -70,7 +72,7 @@ class StateCreate(ActionBaseModel):
     name: Optional[str] = Field(default=None)
     message: Optional[str] = Field(default=None, examples=["Run started"])
     state_details: StateDetails = Field(default_factory=StateDetails)
-    data: Union["ResultRecordMetadata", Any] = Field(
+    data: Union[ResultRecordMetadata, Any] = Field(
         default=None,
     )
 
@@ -100,8 +102,21 @@ class FlowUpdate(ActionBaseModel):
     )
 
 
+# Bare RRule schedules arriving via the API write path get an explicit
+# DTSTART injected here so the scheduler doesn't fall back to the legacy
+# 2020 anchor on every loop. The validator is attached to the *field*
+# (via Annotated) rather than to RRuleSchedule itself — if it lived on
+# the schedule class, it would also fire on every DB read and re-phase
+# INTERVAL>1 schedules. See PrefectHQ/prefect#21362.
+#
+# Fields that accept `None` (e.g. `DeploymentScheduleUpdate.schedule`)
+# use `Optional[NormalizedSchedule]` directly — Pydantic only runs the
+# `AfterValidator` on the non-None branch.
+NormalizedSchedule = Annotated[SCHEDULE_TYPES, AfterValidator(normalize_schedule_rrule)]
+
+
 class DeploymentScheduleCreate(ActionBaseModel):
-    schedule: SCHEDULE_TYPES = Field(
+    schedule: NormalizedSchedule = Field(
         default=..., description="The schedule for the deployment."
     )
     active: bool = Field(
@@ -118,6 +133,10 @@ class DeploymentScheduleCreate(ActionBaseModel):
     slug: Optional[str] = Field(
         default=None,
         description="A unique identifier for the schedule.",
+    )
+    replaces: Optional[str] = Field(
+        default=None,
+        description="The slug of an existing schedule that this schedule replaces. Used for renaming slugs.",
     )
 
     @field_validator("active", mode="wrap")
@@ -178,7 +197,7 @@ class DeploymentScheduleCreate(ActionBaseModel):
 
 
 class DeploymentScheduleUpdate(ActionBaseModel):
-    schedule: Optional[SCHEDULE_TYPES] = Field(
+    schedule: Optional[NormalizedSchedule] = Field(
         default=None, description="The schedule for the deployment."
     )
     active: Optional[bool] = Field(
@@ -196,6 +215,10 @@ class DeploymentScheduleUpdate(ActionBaseModel):
     slug: Optional[str] = Field(
         default=None,
         description="A unique identifier for the schedule.",
+    )
+    replaces: Optional[str] = Field(
+        default=None,
+        description="The slug of an existing schedule that this schedule replaces. Used for renaming slugs.",
     )
 
     @field_validator("max_scheduled_runs")
@@ -303,7 +326,14 @@ class DeploymentCreate(ActionBaseModel):
                     if "default" in v and k in required:
                         required.remove(k)
 
-            jsonschema.validate(self.job_variables, variables_schema)
+            try:
+                jsonschema.validate(
+                    self.job_variables,
+                    variables_schema,
+                    registry=non_fetching_registry(),
+                )
+            except referencing.exceptions.Unresolvable as exc:
+                raise jsonschema.ValidationError(str(exc)) from exc
 
 
 class DeploymentUpdate(ActionBaseModel):
@@ -382,7 +412,14 @@ class DeploymentUpdate(ActionBaseModel):
                         required.remove(k)
 
         if variables_schema is not None:
-            jsonschema.validate(self.job_variables, variables_schema)
+            try:
+                jsonschema.validate(
+                    self.job_variables,
+                    variables_schema,
+                    registry=non_fetching_registry(),
+                )
+            except referencing.exceptions.Unresolvable as exc:
+                raise jsonschema.ValidationError(str(exc)) from exc
 
 
 class DeploymentBranch(ActionBaseModel):

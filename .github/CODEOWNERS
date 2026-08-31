@@ -1,16 +1,5 @@
 # global
-*                                    @cicdw @desertaxle @zzstoatzz
+*                                    @desertaxle @zzstoatzz @chrisguidry
 
 # ui
-/ui                                  @znicholasbrown
-
-# integrations
-/src/integrations/prefect-dbt        @cicdw @desertaxle @zzstoatzz @kevingrismore
-
-# imports
-/src/prefect/__init__.py             @aaazzam @chrisguidry @cicdw @desertaxle @zzstoatzz
-/src/prefect/main.py                 @aaazzam @chrisguidry @cicdw @desertaxle @zzstoatzz
-
-# UI Replatform
-/ui-v2                               @aaazzam @desertaxle @devinvillarosa
-/ui-v2/src/api/prefect.ts            @cicdw @desertaxle @zzstoatzz
+/ui                                  @znicholasbrown @desertaxle @zzstoatzz

@@ -175,6 +175,12 @@ class ConcurrencyOptions(BaseModel):
     """
 
     collision_strategy: ConcurrencyLimitStrategy
+    grace_period_seconds: Optional[int] = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Grace period in seconds for infrastructure to start before concurrency slots are revoked. If not set, falls back to server setting.",
+    )
 
 
 class FlowRun(TimeSeriesBaseModel, ORMBaseModel):
@@ -911,6 +917,24 @@ class Configuration(ORMBaseModel):
     value: Dict[str, Any] = Field(default=..., description="Account info")
 
 
+class ServerDefaultResultStorage(PrefectBaseModel):
+    """Server-side default result storage configuration."""
+
+    default_result_storage_block_id: Optional[UUID] = Field(
+        default=None,
+        description="The block document ID of the server default result storage block.",
+    )
+
+
+class ServerDefaultResultStorageUpdate(PrefectBaseModel):
+    """Request payload for setting the server default result storage block."""
+
+    default_result_storage_block_id: UUID = Field(
+        default=...,
+        description="The block document ID of the server default result storage block.",
+    )
+
+
 class SavedSearchFilter(PrefectBaseModel):
     """A filter for a saved search model. Intended for use by the Prefect UI."""
 
@@ -1022,7 +1046,7 @@ class WorkQueueHealthPolicy(PrefectBaseModel):
         Given empirical information about the state of the work queue, evaluate its health status.
 
         Args:
-            late_runs: the count of late runs for the work queue.
+            late_runs_count: the count of late runs for the work queue.
             last_polled: the last time the work queue was polled, if available.
 
         Returns:

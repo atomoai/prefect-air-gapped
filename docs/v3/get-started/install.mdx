@@ -1,6 +1,7 @@
 ---
 title: Install Prefect 
 icon: arrow-down-to-line
+keywords: ["install", "pip", "setup", "installation", "uv", "conda", "requirements"]
 ---
 
 import Installation from '/snippets/installation.mdx'
@@ -39,6 +40,10 @@ Server:
   Database:           sqlite
   SQLite version:     3.47.1
 ```
+
+<Note>
+If you self-host a Prefect server, keep your client version compatible with the server (generally, client version less than or equal to server version). Prefect Cloud is compatible with all client versions. See [Versioning and compatibility](/v3/release-notes/versioning) for the rules.
+</Note>
 
 <Accordion title="More commands for power users">
 
@@ -105,6 +110,10 @@ To install the latest release of `prefect-client`, run:
 ```bash
 pip install -U prefect-client
 ```
+
+<Note>
+Prefect Cloud is compatible with all client versions. If you self-host a Prefect server, keep your client version compatible with the server (generally, client version less than or equal to server version). See [Versioning and compatibility](/v3/release-notes/versioning) for the rules.
+</Note>
 
 ## Next steps
 

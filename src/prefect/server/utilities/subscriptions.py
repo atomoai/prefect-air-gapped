@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 from asyncio import IncompleteReadError as IOError
 from logging import Logger
 from typing import Optional
@@ -16,11 +17,51 @@ NORMAL_DISCONNECT_EXCEPTIONS = (IOError, ConnectionClosed, WebSocketDisconnect)
 logger: Logger = get_logger("prefect.server.utilities.subscriptions")
 
 
-async def accept_prefect_socket(websocket: WebSocket) -> Optional[WebSocket]:
-    subprotocols = websocket.headers.get("Sec-WebSocket-Protocol", "").split(",")
-    if "prefect" not in subprotocols:
-        return await websocket.close(WS_1002_PROTOCOL_ERROR)
+async def accept_prefect_socket(
+    websocket: WebSocket,
+    *,
+    require_prefect_subprotocol: bool = False,
+    authentication_failed_reason: str | None = None,
+) -> Optional[WebSocket]:
+    subprotocols = [
+        subprotocol.strip()
+        for header in websocket.headers.getlist("Sec-WebSocket-Protocol")
+        for subprotocol in header.split(",")
+    ]
+    has_prefect_subprotocol = "prefect" in subprotocols
 
+    auth_setting = (
+        auth_setting_secret.get_secret_value()
+        if (auth_setting_secret := get_current_settings().server.api.auth_string)
+        else None
+    )
+
+    # If client doesn't send "prefect" subprotocol:
+    # - Reject if auth is configured (security requirement)
+    # - Accept in legacy mode if auth is not configured (backward compatibility)
+    if not has_prefect_subprotocol:
+        if auth_setting or require_prefect_subprotocol:
+            reason = (
+                "'prefect' subprotocol required"
+                if require_prefect_subprotocol
+                else "'prefect' subprotocol required when auth is configured"
+            )
+            logger.warning("WebSocket connection rejected: %s", reason)
+            return await websocket.close(
+                WS_1002_PROTOCOL_ERROR
+                if not require_prefect_subprotocol
+                else WS_1008_POLICY_VIOLATION,
+                reason=authentication_failed_reason,
+            )
+        else:
+            # Legacy mode: accept without auth handshake for old clients
+            logger.debug(
+                "Accepting WebSocket in legacy mode (no 'prefect' subprotocol)"
+            )
+            await websocket.accept()
+            return websocket
+
+    # New protocol: client sent "prefect" subprotocol, perform auth handshake
     await websocket.accept(subprotocol="prefect")
 
     try:
@@ -31,12 +72,6 @@ async def accept_prefect_socket(websocket: WebSocket) -> Optional[WebSocket]:
         # The protocol requires receiving an auth message for compatibility
         # with Prefect Cloud, even if server-side auth is not configured.
         message = await websocket.receive_json()
-
-        auth_setting = (
-            auth_setting_secret.get_secret_value()
-            if (auth_setting_secret := get_current_settings().server.api.auth_string)
-            else None
-        )
         logger.debug(
             f"PREFECT_SERVER_API_AUTH_STRING setting: {'*' * len(auth_setting) if auth_setting else 'Not set'}"
         )
@@ -46,7 +81,8 @@ async def accept_prefect_socket(websocket: WebSocket) -> Optional[WebSocket]:
                 "WebSocket connection closed: Expected 'auth' message first."
             )
             return await websocket.close(
-                WS_1008_POLICY_VIOLATION, reason="Expected 'auth' message"
+                WS_1008_POLICY_VIOLATION,
+                reason=authentication_failed_reason or "Expected 'auth' message",
             )
 
         # Check authentication if PREFECT_SERVER_API_AUTH_STRING is set
@@ -61,13 +97,17 @@ async def accept_prefect_socket(websocket: WebSocket) -> Optional[WebSocket]:
                 )
                 return await websocket.close(
                     WS_1008_POLICY_VIOLATION,
-                    reason="Auth required but no token provided",
+                    reason=(
+                        authentication_failed_reason
+                        or "Auth required but no token provided"
+                    ),
                 )
 
-            if received_token != auth_setting:
+            if not hmac.compare_digest(received_token, auth_setting):
                 logger.warning("WebSocket connection closed: Invalid token.")
                 return await websocket.close(
-                    WS_1008_POLICY_VIOLATION, reason="Invalid token"
+                    WS_1008_POLICY_VIOLATION,
+                    reason=authentication_failed_reason or "Invalid token",
                 )
             logger.debug("WebSocket token authentication successful.")
         else:

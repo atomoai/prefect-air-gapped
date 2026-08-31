@@ -2,6 +2,7 @@
 title: Deployments
 sidebarTitle: Deployments
 description: Learn how to use deployments to trigger flow runs remotely.
+keywords: ["deployment", "remote execution", "schedule", "trigger", "serve", "deploy", "naming"]
 ---
 
 Deployments allow you to run flows on a [schedule](/v3/concepts/schedules) and trigger runs based on [events](/v3/how-to-guides/automations/creating-deployment-triggers/).
@@ -11,7 +12,7 @@ They store the crucial metadata for remote orchestration including when, where, 
 
 In addition to manually triggering and managing flow runs, deploying a flow exposes an API and UI that allow you to:
 
-- trigger new runs, [cancel active runs](/v3/how-to-guides/workflows/write-and-run#cancel-a-flow-run), pause scheduled runs, [customize parameters](/v3/concepts/flows#specify-flow-parameters), and more
+- trigger new runs, [cancel active runs](/v3/advanced/cancel-workflows), pause scheduled runs, [customize parameters](/v3/concepts/flows#specify-flow-parameters), and more
 - remotely configure [schedules](/v3/concepts/schedules) and [automation rules](/v3/how-to-guides/automations/creating-deployment-triggers)
 - dynamically provision infrastructure with [work pools](/v3/deploy/infrastructure-concepts/work-pools) - optionally with templated guardrails for other users
 
@@ -23,7 +24,7 @@ In Prefect Cloud, deployment configuration is versioned, and a new [deployment v
 [Work pools](/v3/concepts/work-pools) allow you to switch between different types of infrastructure and to create a template for deployments.
 Data platform teams find work pools especially useful for managing infrastructure configuration across teams of data professionals.
 
-Common work pool types include [Docker](/v3/how-to-guides/deployment_infra/docker), [Kubernetes](/v3/how-to-guides/deployment_infra/kubernetes), and serverless options such as [AWS ECS](/integrations/prefect-aws/ecs_guide#ecs-worker-guide), [Azure ACI](/integrations/prefect-azure/aci_worker), [GCP Vertex AI](/integrations/prefect-gcp/index#run-flows-on-google-cloud-run-or-vertex-ai), or [GCP Google Cloud Run](/integrations/prefect-gcp/gcp-worker-guide).
+Common work pool types include [Docker](/v3/how-to-guides/deployment_infra/docker), [Kubernetes](/v3/how-to-guides/deployment_infra/kubernetes), and serverless options such as [AWS ECS](/integrations/prefect-aws/ecs-worker), [Azure ACI](/integrations/prefect-azure/aci_worker), [GCP Vertex AI](/integrations/prefect-gcp/index#run-flows-on-google-cloud-run-or-vertex-ai), or [GCP Google Cloud Run](/integrations/prefect-gcp/gcp-worker-guide).
 
 ### Work pool-based deployment requirements
 
@@ -149,7 +150,10 @@ class Deployment:
 
     # concurrency limiting
     concurrency_limit: int | None = None
-    concurrency_options: ConcurrencyOptions(collision_strategy=Literal['ENQUEUE', 'CANCEL_NEW']) | None = None
+    concurrency_options: ConcurrencyOptions(
+        collision_strategy=Literal['ENQUEUE', 'CANCEL_NEW'],
+        grace_period_seconds=int  # 60-86400, default 300
+    ) | None = None
 
     # metadata for bookkeeping
     version: str | None = None
@@ -196,10 +200,13 @@ The other two fields are:
 For example, if a deployment references a workflow defined within a Docker image, the `path` is the
 absolute path to the parent directory where that workflow will run anytime the deployment is triggered.
 This interpretation is more subtle in the case of flows defined in remote filesystems.
-- **`entrypoint`**: the entrypoint of a deployment is a relative reference to a function decorated as a
-flow that exists on some filesystem. It is always specified relative to the `path`.
-Entrypoints use Python's standard path-to-object syntax
-(for example, `path/to/file.py:function_name` or simply `path:object`).
+- **`entrypoint`**: the entrypoint of a deployment is a reference to a function decorated as a
+flow that exists on some filesystem. Entrypoints support two formats:
+    - **File path format**: a path to the file and function name separated by a colon, relative to the `path`
+    (for example, `path/to/file.py:function_name`).
+    - **Module path format**: a fully-qualified Python module path to the flow function
+    (for example, `my_module.my_flow.my_func`). When using module paths, the module must be importable
+    in the execution environment.
 
 The entrypoint must reference the same flow as the flow ID.
 
@@ -218,6 +225,81 @@ infrastructure.
 This is key to the Prefect hybrid model: there's a boundary between your proprietary assets,
 such as your flow code, and the Prefect backend (including [Prefect Cloud](/v3/how-to-guides/cloud/connect-to-cloud)).
 </Note>
+
+### Naming recommendations
+
+Flow names describe **what** a workflow does; deployment names describe **how, where, or when** it runs.
+Because every deployment is referenced as `{FLOW_NAME}/{DEPLOYMENT_NAME}`, choose deployment names that
+add context beyond what the flow name already provides.
+
+#### Encode what varies between deployments
+
+If you deploy the same flow to multiple environments, regions, or schedules, reflect that difference in the deployment name:
+
+{/* pmd-metadata: notest */}
+```python
+# Environment-based names
+my_flow.serve(name="staging")
+my_flow.serve(name="production")
+
+# Schedule-based names
+my_flow.deploy(name="hourly-refresh", work_pool_name="my-pool")
+my_flow.deploy(name="nightly-full-sync", work_pool_name="my-pool")
+
+# Region or team-based names
+my_flow.deploy(name="us-east-analytics", work_pool_name="my-pool")
+my_flow.deploy(name="eu-west-compliance", work_pool_name="my-pool")
+```
+
+These names produce clear, scannable entries in the CLI and UI:
+
+{/* pmd-metadata: notest */}
+```text
+customer-data-pipeline/hourly-refresh
+customer-data-pipeline/nightly-full-sync
+invoice-processor/us-east-analytics
+invoice-processor/eu-west-compliance
+```
+
+#### Avoid generic names
+
+Names like `prod`, `default`, or `main` become hard to distinguish when you have many flows.
+A deployment view filled with identically named entries provides no useful context at a glance:
+
+{/* pmd-metadata: notest */}
+```text
+# Hard to scan — every deployment has the same name
+customer-data-pipeline/prod
+invoice-processor/prod
+risk-model-training/prod
+```
+
+Instead, use names that describe the deployment's purpose or configuration:
+
+{/* pmd-metadata: notest */}
+```text
+customer-data-pipeline/daily-sync
+invoice-processor/us-east
+risk-model-training/weekly-retrain
+```
+
+<Tip>
+If you only have one deployment per flow today, choose a name that describes its schedule or
+target environment rather than a label like `default`. As your project grows, descriptive names
+prevent confusion when more deployments are added.
+</Tip>
+
+#### Naming conventions for teams
+
+When multiple teams share a Prefect workspace, establish a consistent naming convention.
+Common patterns include:
+
+- **`{environment}`** — `staging`, `production`
+- **`{environment}-{variant}`** — `production-hourly`, `staging-backfill`
+- **`{region}-{environment}`** — `us-east-production`, `eu-west-staging`
+
+Pick one pattern and apply it across your organization so that deployment names remain predictable
+and filterable.
 
 ### Workflow scheduling and parametrization
 
@@ -251,10 +333,14 @@ Prefect supports managing concurrency at the deployment level to enable limiting
 deployment can be active at once. To enable this behavior, deployments have the following fields:
 
 - **`concurrency_limit`**: an integer that sets the maximum number of concurrent flow runs for the deployment.
-- **`collision_strategy`**: configure the behavior for runs once the concurrency limit is reached.
-Falls back to `ENQUEUE` if unset.
-  - `ENQUEUE`: new runs transition to `AwaitingConcurrencySlot` and execute as slots become available.
-  - `CANCEL_NEW`: new runs are canceled until a slot becomes available.
+- **`concurrency_options`**: an optional `ConcurrencyOptions` object to configure concurrency behavior:
+  - **`collision_strategy`**: configure the behavior for runs once the concurrency limit is reached.
+  Falls back to `ENQUEUE` if unset.
+    - `ENQUEUE`: new runs transition to `AwaitingConcurrencySlot` and execute as slots become available.
+    - `CANCEL_NEW`: new runs are canceled until a slot becomes available.
+  - **`grace_period_seconds`**: the time in seconds to allow infrastructure to start before the concurrency
+  slot is released. This is useful for deployments with slow-starting infrastructure. Must be between 60 and
+  86400 seconds. If not set, falls back to the server setting (default 300 seconds / 5 minutes).
 
 <CodeGroup>
 
@@ -273,7 +359,9 @@ my_flow.deploy(..., concurrency_limit=3)
 my_flow.deploy(
     ...,
     concurrency_limit=ConcurrencyLimitConfig(
-        limit=3, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW
+        limit=3,
+        collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW,
+        grace_period_seconds=120,  # 2 minutes
     ),
 )
 ```
@@ -289,7 +377,9 @@ my_flow.serve(..., global_limit=3)
 my_flow.serve(
     ...,
     global_limit=ConcurrencyLimitConfig(
-        limit=3, collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW
+        limit=3,
+        collision_strategy=ConcurrencyLimitStrategy.CANCEL_NEW,
+        grace_period_seconds=120,  # 2 minutes
     ),
 )
 ```

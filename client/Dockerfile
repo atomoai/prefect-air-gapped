@@ -1,31 +1,12 @@
 ARG PYTHON_VERSION=3.10
-# SQLite version to install (format: X.YY.Z becomes XYYZZOO in filename)
+# SQLite version — must match the tag published to prefecthq/prefect-sqlite on DockerHub
+# See Dockerfile.sqlite-builder and .github/workflows/sqlite-builder.yaml
 ARG SQLITE_VERSION=3.50.4
-ARG SQLITE_YEAR=2025
-ARG SQLITE_FILE_VERSION=3500400
 
-# Build SQLite from source to address CVE-2025-6965
-# This stage is cached separately to avoid recompiling on every build
-FROM python:${PYTHON_VERSION}-slim AS sqlite-builder
-
-ARG SQLITE_VERSION
-ARG SQLITE_YEAR
-ARG SQLITE_FILE_VERSION
-
-RUN apt-get update && \
-    apt-get install --no-install-recommends -y \
-    build-essential \
-    wget \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-RUN wget -q https://sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_FILE_VERSION}.tar.gz && \
-    tar xzf sqlite-autoconf-${SQLITE_FILE_VERSION}.tar.gz && \
-    cd sqlite-autoconf-${SQLITE_FILE_VERSION} && \
-    ./configure --prefix=/usr/local && \
-    make -j$(nproc) && \
-    make install && \
-    cd .. && \
-    rm -rf sqlite-autoconf-${SQLITE_FILE_VERSION} sqlite-autoconf-${SQLITE_FILE_VERSION}.tar.gz
+# Pull pre-compiled SQLite binaries (built by .github/workflows/sqlite-builder.yaml).
+# This avoids compiling SQLite from source on every build.
+# To publish a new version: bump SQLITE_VERSION and run the sqlite-builder workflow.
+FROM prefecthq/prefect-sqlite:${SQLITE_VERSION} AS sqlite-builder
 
 # Build the Python distributable.
 # Without this build step, versioningit cannot infer the version without git
@@ -40,7 +21,7 @@ RUN apt-get update && \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install UV from official image - pin to specific version for build caching
-COPY --from=ghcr.io/astral-sh/uv:0.5.30 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /bin/uv
 
 # Copy the repository in; requires full git history for versions to generate correctly
 COPY . ./
@@ -59,13 +40,10 @@ FROM python:${PYTHON_VERSION}-slim
 # Redeclare ARGs needed in this stage
 ARG PYTHON_VERSION
 ARG SQLITE_VERSION
-ARG SQLITE_YEAR
-ARG SQLITE_FILE_VERSION
 
 ENV LC_ALL=C.UTF-8
 ENV LANG=C.UTF-8
 
-ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 ENV UV_SYSTEM_PYTHON=1
 
@@ -95,13 +73,14 @@ COPY --from=sqlite-builder /usr/local/lib/pkgconfig/sqlite3.pc /usr/local/lib/pk
 RUN ldconfig
 
 # Install UV from official image - pin to specific version for build caching
-COPY --from=ghcr.io/astral-sh/uv:0.5.30 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /bin/uv
 
-# Install prefect from the sdist
-COPY --from=python-builder /opt/prefect/dist ./dist
+# Install prefect from the sdist. The sdist is bind-mounted instead of copied in: a
+# COPY commits the archive to its own layer, and a later `rm -rf` can only add a
+# whiteout on top of that layer, so the archive still ships in the pushed image.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install "./dist/prefect_client.tar.gz" && \
-    rm -rf dist/
+    --mount=type=bind,from=python-builder,source=/opt/prefect/dist,target=/dist \
+    UV_COMPILE_BYTECODE=1 uv pip install "/dist/prefect_client.tar.gz"
 
 # Remove setuptools
 RUN uv pip uninstall setuptools

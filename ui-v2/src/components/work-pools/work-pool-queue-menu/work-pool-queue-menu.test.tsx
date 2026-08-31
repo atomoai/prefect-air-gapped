@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFakeWorkPoolQueue } from "@/mocks";
 import { WorkPoolQueueMenu } from "./work-pool-queue-menu";
 
-// Mock the hook and dialog
+// Mock the hook and dialogs
 vi.mock("./hooks/use-work-pool-queue-menu", () => ({
 	useWorkPoolQueueMenu: vi.fn(() => ({
 		menuItems: [

@@ -479,7 +479,7 @@ class FlowRun(Run):
         sa.ForeignKey("flow.id", ondelete="cascade"), index=True
     )
 
-    deployment_id: Mapped[Optional[uuid.UUID]] = mapped_column()
+    deployment_id: Mapped[Optional[uuid.UUID]] = mapped_column(index=True)
     work_queue_name: Mapped[Optional[str]] = mapped_column(index=True)
     flow_version: Mapped[Optional[str]] = mapped_column(index=True)
     deployment_version: Mapped[Optional[str]] = mapped_column(index=True)
@@ -759,6 +759,11 @@ class TaskRun(Run):
             sa.Index(
                 "ix_task_run__state_type",
                 cls.state_type,
+            ),
+            sa.Index(
+                "ix_task_run__state_type_start_time",
+                cls.state_type,
+                cls.start_time,
             ),
             sa.Index(
                 "ix_task_run__state_name",
@@ -1085,6 +1090,13 @@ class BlockDocumentReference(Base):
 
     reference_block_document_id: Mapped[uuid.UUID] = mapped_column(
         sa.ForeignKey("block_document.id", ondelete="cascade"),
+    )
+
+    __table_args__: Any = (
+        sa.CheckConstraint(
+            "parent_block_document_id != reference_block_document_id",
+            name="ck_block_document_reference__no_self_reference",
+        ),
     )
 
 
@@ -1452,6 +1464,14 @@ class EventResource(Base):
             "ix_event_resources__resource_id__occurred",
             "resource_id",
             "occurred",
+        ),
+        sa.Index(
+            "ix_event_resources__occurred",
+            "occurred",
+        ),
+        sa.Index(
+            "ix_event_resources__event_id",
+            "event_id",
         ),
     )
 

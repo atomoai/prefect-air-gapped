@@ -20,6 +20,8 @@ from prefect.server.schemas.core import Deployment, Flow, FlowRun
 from prefect.server.schemas.states import Running, StateType
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture
 async def take_a_picture(session: AsyncSession) -> Deployment:
@@ -215,13 +217,20 @@ async def test_success_event(
     (triggered_event, executed_event) = AssertingEventsClient.last.events
 
     assert triggered_event.event == "prefect.automation.action.triggered"
+    assert suspend_that_weird_exposure.triggering_event is not None
     assert triggered_event.related == [
         RelatedResource.model_validate(
             {
                 "prefect.resource.id": f"prefect.flow-run.{super_long_exposure.id}",
                 "prefect.resource.role": "target",
             }
-        )
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{suspend_that_weird_exposure.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
+            }
+        ),
     ]
     assert triggered_event.payload == {
         "action_index": 0,
@@ -236,7 +245,13 @@ async def test_success_event(
                 "prefect.resource.id": f"prefect.flow-run.{super_long_exposure.id}",
                 "prefect.resource.role": "target",
             }
-        )
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{suspend_that_weird_exposure.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
+            }
+        ),
     ]
     assert executed_event.payload == {
         "action_index": 0,

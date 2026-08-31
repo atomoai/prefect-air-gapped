@@ -29,39 +29,60 @@
         </p-context-nav-item>
       </a>
 
-      <p-context-nav-item @click="openJoinCommunityModal">
+      <p-context-nav-item v-if="showPromotionalContent" @click="openJoinCommunityModal">
         Join the Community
         <JoinTheCommunityModal :show-modal="showJoinCommunityModal || !joinTheCommunityModalDismissed" @update:show-modal="updateShowModal" />
       </p-context-nav-item>
-
       <p-context-nav-item title="Settings" :to="routes.settings()" />
+      <p-context-nav-item v-if="canSwitchToV2" title="Switch to V2 UI" @click="handleSwitchToV2" />
     </template>
   </p-context-sidebar>
 </template>
 
 <script lang="ts" setup>
+  import { PContextNavItem, PContextSidebar } from '@prefecthq/prefect-design'
+  import { localization, useShowModal } from '@prefecthq/prefect-ui-library'
+  import { useStorage } from '@prefecthq/vue-compositions'
+  import { computed, ref } from 'vue'
+  import { useRoute } from 'vue-router'
   import JoinTheCommunityModal from '@/components/JoinTheCommunityModal.vue'
   import { useCan } from '@/compositions/useCan'
   import { usePrefectApi } from '@/compositions/usePrefectApi'
   import { routes } from '@/router'
-  import { PContextNavItem, PContextSidebar } from '@prefecthq/prefect-design'
-  import { localization, useShowModal } from '@prefecthq/prefect-ui-library'
-  import { useStorage } from '@prefecthq/vue-compositions'
-  import { computed } from 'vue'
+  import { Settings, UiSettings } from '@/services/uiSettings'
+  import { isUiAvailable, switchToV2Ui } from '@/utilities/uiVersion'
 
   const can = useCan()
   const api = usePrefectApi()
+  const route = useRoute()
   const serverSettings = await api.admin.getSettings()
-  const showPromotionalContent = computed(() => serverSettings.server.ui.show_promotional_content)
+  const showPromotionalContent = computed(() => serverSettings.PREFECT_SERVER_UI_SHOW_PROMOTIONAL_CONTENT)
 
   // Cache to localStorage for use in error toasts
   localStorage.setItem('prefect-show-promotional-content', String(showPromotionalContent.value))
   const canSeeWorkPools = computed(() => can.read.work_pool)
 
+  const browserUiSettings = ref<Settings | null>(UiSettings.settings)
+  const canSwitchToV2 = computed(() => {
+    return browserUiSettings.value !== null && isUiAvailable(browserUiSettings.value, 'v2')
+  })
+
+  void UiSettings.loadOptional().then(settings => {
+    browserUiSettings.value = settings
+  })
+
+  function handleSwitchToV2(): void {
+    if (browserUiSettings.value === null) {
+      return
+    }
+
+    switchToV2Ui(browserUiSettings.value, route.path)
+  }
+
   const { showModal: showJoinCommunityModal, open: openJoinCommunityModal } = useShowModal()
   const { value: joinTheCommunityModalDismissed } = useStorage('local', 'join-the-community-modal-dismissed', false)
-  function updateShowModal(updatedShowModal: boolean): void {
-    showJoinCommunityModal.value = updatedShowModal
+  function updateShowModal(updatedShowModal: boolean | undefined): void {
+    showJoinCommunityModal.value = updatedShowModal ?? false
     if (!updatedShowModal) {
       joinTheCommunityModalDismissed.value = true
     }

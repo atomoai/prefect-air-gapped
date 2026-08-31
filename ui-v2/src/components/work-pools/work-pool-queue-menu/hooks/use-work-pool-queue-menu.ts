@@ -14,14 +14,31 @@ export const useWorkPoolQueueMenu = (queue: WorkPoolQueue) => {
 	};
 
 	const handleEdit = () => {
-		// TODO: Navigate to edit queue page when route exists
-		console.log("Edit queue:", queue.name);
+		void navigate({
+			to: "/work-pools/work-pool/$workPoolName/queue/$workQueueName/edit",
+			params: {
+				workPoolName: queue.work_pool_name ?? "",
+				workQueueName: queue.name,
+			},
+		});
 	};
 
 	const handleAutomate = () => {
-		// TODO: Navigate to automation creation when route supports queue relations
 		void navigate({
 			to: "/automations/create",
+			search: {
+				trigger: {
+					type: "event",
+					posture: "Reactive",
+					match: {
+						"prefect.resource.id": `prefect.work-queue.${queue.id}`,
+					},
+					for_each: ["prefect.resource.id"],
+					expect: ["prefect.work-queue.not-ready"],
+					threshold: 1,
+					within: 0,
+				},
+			},
 		});
 	};
 

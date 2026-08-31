@@ -33,6 +33,7 @@ The default template used for Kubernetes job manifests looks like this:
 apiVersion: batch/v1
 kind: Job
 metadata:
+annotations: "{{ annotations }}"
 labels: "{{ labels }}"
 namespace: "{{ namespace }}"
 generateName: "{{ name }}-"
@@ -68,6 +69,7 @@ pool you could update the job manifest template to look like this:
 apiVersion: batch/v1
 kind: Job
 metadata:
+annotations: "{{ annotations }}"
 labels: "{{ labels }}"
 namespace: "{{ namespace }}"
 generateName: "{{ name }}-"
@@ -105,7 +107,7 @@ from __future__ import annotations
 import base64
 import enum
 import json
-import shlex
+import uuid
 from contextlib import asynccontextmanager
 from typing import (
     TYPE_CHECKING,
@@ -135,15 +137,17 @@ from kubernetes_asyncio.client.models import (
     V1Secret,
 )
 from pydantic import Field, field_validator, model_validator
-from tenacity import retry, stop_after_attempt, wait_fixed, wait_random
+from tenacity import AsyncRetrying, stop_after_attempt, wait_fixed, wait_random
 from typing_extensions import Literal, Self
 
 import prefect
 from prefect.client.schemas.objects import Flow as APIFlow
 from prefect.exceptions import (
     InfrastructureError,
+    InfrastructureNotFound,
 )
 from prefect.utilities.dockerutils import get_prefect_image_name
+from prefect.utilities.processutils import command_from_string
 from prefect.utilities.templating import find_placeholders
 from prefect.workers.base import (
     BaseJobConfiguration,
@@ -162,17 +166,13 @@ from prefect_kubernetes.utilities import (
 )
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from prefect.client.schemas.objects import FlowRun, WorkPool
     from prefect.client.schemas.responses import DeploymentResponse
 
 # Captures flow return type
 R = TypeVar("R")
-
-
-MAX_ATTEMPTS = 3
-RETRY_MIN_DELAY_SECONDS = 1
-RETRY_MIN_DELAY_JITTER_SECONDS = 0
-RETRY_MAX_DELAY_JITTER_SECONDS = 3
 
 
 def _get_default_job_manifest_template() -> Dict[str, Any]:
@@ -181,6 +181,7 @@ def _get_default_job_manifest_template() -> Dict[str, Any]:
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
+            "annotations": "{{ annotations }}",
             "labels": "{{ labels }}",
             "namespace": "{{ namespace }}",
             "generateName": "{{ name }}-",
@@ -201,6 +202,16 @@ def _get_default_job_manifest_template() -> Dict[str, Any]:
                             "image": "{{ image }}",
                             "imagePullPolicy": "{{ image_pull_policy }}",
                             "args": "{{ command }}",
+                            "resources": {
+                                "limits": {
+                                    "cpu": "{{ cpu_limit }}",
+                                    "memory": "{{ memory_limit }}",
+                                },
+                                "requests": {
+                                    "cpu": "{{ cpu_request }}",
+                                    "memory": "{{ memory_request }}",
+                                },
+                            },
                         }
                     ],
                 }
@@ -214,7 +225,7 @@ def _get_base_job_manifest():
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": {"labels": {}},
+        "metadata": {"annotations": {}, "labels": {}},
         "spec": {
             "template": {
                 "spec": {
@@ -265,6 +276,13 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         stream_output: Whether or not to stream the job's output.
     """
 
+    annotations: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Annotations applied to infrastructure created by the worker using "
+            "this job configuration."
+        ),
+    )
     namespace: str = Field(default="default")
     job_manifest: Dict[str, Any] = Field(
         json_schema_extra=dict(template=_get_default_job_manifest_template())
@@ -291,6 +309,10 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         # Ensure metadata is present
         if "metadata" not in job_manifest:
             job_manifest["metadata"] = {}
+
+        # Ensure annotations is present in metadata
+        if "annotations" not in job_manifest["metadata"]:
+            job_manifest["metadata"]["annotations"] = {}
 
         # Ensure labels is present in metadata
         if "labels" not in job_manifest["metadata"]:
@@ -337,13 +359,39 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         """
         Generate a dictionary of labels for a flow run job.
         """
+        slugified_version = _slugify_label_value(prefect.__version__.split("+")[0])
         return {
             "prefect.io/flow-run-id": str(flow_run.id),
             "prefect.io/flow-run-name": flow_run.name,
-            "prefect.io/version": _slugify_label_value(
-                prefect.__version__.split("+")[0]
-            ),
+            "prefect.io/version": slugified_version,
+            "app.kubernetes.io/managed-by": "prefect",
+            "app.kubernetes.io/part-of": "prefect",
+            "app.kubernetes.io/version": slugified_version,
         }
+
+    @staticmethod
+    def _base_flow_labels(flow: "APIFlow | None") -> Dict[str, str]:
+        """
+        Generate a dictionary of labels for a flow run job, including standard
+        app.kubernetes.io labels.
+        """
+        labels = BaseJobConfiguration._base_flow_labels(flow)
+        if flow is not None:
+            labels["app.kubernetes.io/name"] = _slugify_label_value(flow.name)
+        return labels
+
+    @staticmethod
+    def _base_deployment_labels(
+        deployment: "DeploymentResponse | None",
+    ) -> Dict[str, str]:
+        """
+        Generate a dictionary of labels for a deployment, including standard
+        app.kubernetes.io labels.
+        """
+        labels = BaseJobConfiguration._base_deployment_labels(deployment)
+        if deployment is not None:
+            labels["app.kubernetes.io/name"] = _slugify_label_value(deployment.name)
+        return labels
 
     def get_environment_variable_value(self, name: str) -> str | None:
         """
@@ -368,6 +416,7 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         flow: "APIFlow | None" = None,
         work_pool: "WorkPool | None" = None,
         worker_name: str | None = None,
+        worker_id: "UUID | None" = None,
     ):
         """
         Prepares the job configuration for a flow run.
@@ -393,9 +442,10 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
                     original_env[item["name"]] = item.get("value")
             self.env = original_env
 
-        super().prepare_for_flow_run(flow_run, deployment, flow, work_pool, worker_name)
+        super().prepare_for_flow_run(
+            flow_run, deployment, flow, work_pool, worker_name, worker_id=worker_id
+        )
 
-        self._configure_eviction_handling()
         self._update_prefect_api_url_if_local_server()
 
         # Restore any special env vars with valueFrom before populating the manifest
@@ -406,12 +456,18 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
             env_list.extend(special_env_vars)
             self.env = env_list
 
+        # After the restore, so a `valueFrom` behavior is visible here instead of
+        # being appended back on top of what we set.
+        self._configure_eviction_handling()
+
         self._populate_env_in_manifest()
         self._slugify_labels()
+        self._slugify_annotations()
         self._populate_image_if_not_present()
         self._populate_command_if_not_present()
         self._populate_generate_name_if_not_present()
         self._propagate_labels_to_pod()
+        self._propagate_annotations_to_pod()
 
     def _configure_eviction_handling(self):
         """
@@ -421,9 +477,9 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         not set in env, we'll tell the Runner to reschedule its flow run when it receives
         a SIGTERM.
 
-        If `backoffLimit` is set to a positive number, we'll ensure that the
-        reschedule SIGTERM handling is not set. Having both a `backoffLimit` and
-        reschedule handling set can cause duplicate flow run execution.
+        If `backoffLimit` is anything other than 0 (including absent, where Kubernetes
+        defaults it to 6), Kubernetes owns Job retries, so we tell the supervisor to
+        `relinquish` the run on SIGTERM instead of proposing a terminal state.
         """
         # If backoffLimit is set to 0, we'll tell the Runner to reschedule
         # its flow run when it receives a SIGTERM.
@@ -441,19 +497,22 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
                         "value": "reschedule",
                     }
                 )
-        # Otherwise, we'll ensure that the reschedule SIGTERM handling is not set.
+        # Otherwise Kubernetes owns retries, so the run must not be finalized.
         else:
             if isinstance(self.env, dict):
-                self.env.pop("PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR", None)
-            elif any(
-                v.get("name") == "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR"
-                for v in self.env
-            ):
+                self.env["PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR"] = "relinquish"
+            else:
                 self.env = [
                     v
                     for v in self.env
                     if v.get("name") != "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR"
                 ]
+                self.env.append(
+                    {
+                        "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                        "value": "relinquish",
+                    }
+                )
 
     def _populate_env_in_manifest(self):
         """
@@ -566,11 +625,11 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
             if command is None:
                 self.job_manifest["spec"]["template"]["spec"]["containers"][0][
                     "args"
-                ] = shlex.split(self._base_flow_run_command())
+                ] = command_from_string(self._base_flow_run_command())
             elif isinstance(command, str):
                 self.job_manifest["spec"]["template"]["spec"]["containers"][0][
                     "args"
-                ] = shlex.split(command)
+                ] = command_from_string(command)
             elif not isinstance(command, list):
                 raise ValueError(
                     "Invalid job manifest template: 'command' must be a string or list."
@@ -616,6 +675,37 @@ class KubernetesWorkerJobConfiguration(BaseJobConfiguration):
         }
         self.job_manifest["spec"]["template"]["metadata"] = current_pod_metadata
 
+    def _slugify_annotations(self):
+        """Merges and slugifies annotation keys in the job manifest.
+
+        Annotation keys follow the same rules as label keys, but annotation
+        values are arbitrary strings so only keys are slugified.
+        """
+        all_annotations = {
+            **self.job_manifest["metadata"].get("annotations", {}),
+            **self.annotations,
+        }
+        self.job_manifest["metadata"]["annotations"] = {
+            _slugify_label_key(k): v for k, v in all_annotations.items()
+        }
+
+    def _propagate_annotations_to_pod(self):
+        """Propagates annotations to the pod in the job manifest.
+
+        Unlike labels, there are no automatic base annotations, so we only
+        touch pod metadata when the user actually provided annotations.
+        """
+        merged_annotations = self.job_manifest["metadata"].get("annotations", {})
+        if not merged_annotations:
+            return
+
+        current_pod_metadata = self.job_manifest["spec"]["template"].get("metadata", {})
+        current_pod_annotations = current_pod_metadata.get("annotations", {})
+        all_annotations = {**current_pod_annotations, **merged_annotations}
+
+        current_pod_metadata["annotations"] = all_annotations
+        self.job_manifest["spec"]["template"]["metadata"] = current_pod_metadata
+
 
 class KubernetesWorkerVariables(BaseVariables):
     """
@@ -625,6 +715,10 @@ class KubernetesWorkerVariables(BaseVariables):
     base job template.
     """
 
+    annotations: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Annotations applied to Kubernetes jobs and pods created by the worker.",
+    )
     namespace: str = Field(
         default="default", description="The Kubernetes namespace to create jobs within."
     )
@@ -649,8 +743,8 @@ class KubernetesWorkerVariables(BaseVariables):
         description=(
             "The number of times Kubernetes will retry a job after pod eviction. "
             "If set to 0, Prefect will reschedule the flow run when the pod is evicted "
-            "unless PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR is set to value "
-            "different from 'reschedule'."
+            "unless PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR is already set. "
+            "Otherwise Kubernetes retries the Job and Prefect relinquishes the run."
         ),
     )
     finished_job_ttl: Optional[int] = Field(
@@ -680,6 +774,42 @@ class KubernetesWorkerVariables(BaseVariables):
     cluster_config: Optional[KubernetesClusterConfig] = Field(
         default=None,
         description="The Kubernetes cluster config to use for job creation.",
+    )
+    cpu_request: Optional[str] = Field(
+        default=None,
+        title="CPU Request",
+        description=(
+            "The CPU resource request for the Kubernetes job container. Uses"
+            " Kubernetes resource quantity format (e.g. '500m' for half a CPU,"
+            " '2' for two CPUs). If not provided, no CPU request is configured."
+        ),
+    )
+    cpu_limit: Optional[str] = Field(
+        default=None,
+        title="CPU Limit",
+        description=(
+            "The CPU resource limit for the Kubernetes job container. Uses"
+            " Kubernetes resource quantity format (e.g. '500m' for half a CPU,"
+            " '2' for two CPUs). If not provided, no CPU limit is configured."
+        ),
+    )
+    memory_request: Optional[str] = Field(
+        default=None,
+        title="Memory Request",
+        description=(
+            "The memory resource request for the Kubernetes job container. Uses"
+            " Kubernetes resource quantity format (e.g. '128Mi', '1Gi'). If not"
+            " provided, no memory request is configured."
+        ),
+    )
+    memory_limit: Optional[str] = Field(
+        default=None,
+        title="Memory Limit",
+        description=(
+            "The memory resource limit for the Kubernetes job container. Uses"
+            " Kubernetes resource quantity format (e.g. '128Mi', '1Gi'). If not"
+            " provided, no memory limit is configured."
+        ),
     )
 
 
@@ -725,8 +855,6 @@ class KubernetesWorker(
         Args:
             flow_run: The flow run to execute
             configuration: The configuration to use when executing the flow run
-            task_status: The task status object for the current flow run. If provided,
-                the task will be marked as started.
         """
         logger = self.get_flow_run_logger(flow_run)
         async with self._get_configured_kubernetes_client(configuration) as client:
@@ -761,6 +889,11 @@ class KubernetesWorker(
             job = await self._create_job(configuration, client)
 
             assert job, "Job should be created"
+            logger.info(
+                "Kubernetes job '%s' created in namespace '%s'",
+                job.metadata.name,
+                job.metadata.namespace,
+            )
             pid = f"{job.metadata.namespace}:{job.metadata.name}"
             # Indicate that the job has started
             if task_status is not None:
@@ -787,6 +920,53 @@ class KubernetesWorker(
                     self._logger.warning(
                         "Failed to delete created secret with exception: %s", result
                     )
+
+    async def kill_infrastructure(
+        self,
+        infrastructure_pid: str,
+        configuration: KubernetesWorkerJobConfiguration,
+        grace_seconds: int = 30,
+    ) -> None:
+        """
+        Kill a Kubernetes job by deleting it.
+
+        Args:
+            infrastructure_pid: The infrastructure identifier in format "namespace:job_name".
+            configuration: The job configuration used to connect to the cluster.
+            grace_seconds: Time to allow for graceful shutdown before force killing.
+
+        Raises:
+            InfrastructureNotFound: If the job doesn't exist.
+            InfrastructureNotAvailable: If unable to connect to the cluster.
+        """
+        # Parse infrastructure_pid (format: "namespace:job_name")
+        parts = infrastructure_pid.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid infrastructure_pid format: {infrastructure_pid!r}. "
+                "Expected format: 'namespace:job_name'"
+            )
+        job_namespace, job_name = parts
+
+        async with self._get_configured_kubernetes_client(configuration) as client:
+            batch_client = BatchV1Api(api_client=client)
+
+            try:
+                await batch_client.delete_namespaced_job(
+                    name=job_name,
+                    namespace=job_namespace,
+                    grace_period_seconds=grace_seconds,
+                    propagation_policy="Foreground",
+                )
+                self._logger.info(
+                    f"Deleted Kubernetes job {job_name!r} in namespace {job_namespace!r}"
+                )
+            except ApiException as exc:
+                if exc.status == 404:
+                    raise InfrastructureNotFound(
+                        f"Kubernetes job {job_name!r} not found in namespace {job_namespace!r}"
+                    )
+                raise
 
     @asynccontextmanager
     async def _get_configured_kubernetes_client(
@@ -879,15 +1059,6 @@ class KubernetesWorker(
                 "env"
             ] = manifest_env
 
-    @retry(
-        stop=stop_after_attempt(MAX_ATTEMPTS),
-        wait=wait_fixed(RETRY_MIN_DELAY_SECONDS)
-        + wait_random(
-            RETRY_MIN_DELAY_JITTER_SECONDS,
-            RETRY_MAX_DELAY_JITTER_SECONDS,
-        ),
-        reraise=True,
-    )
     async def _create_job(
         self, configuration: KubernetesWorkerJobConfiguration, client: "ApiClient"
     ) -> "V1Job":
@@ -928,13 +1099,44 @@ class KubernetesWorker(
                     "and `PREFECT_INTEGRATIONS_KUBERNETES_WORKER_API_AUTH_STRING_SECRET_KEY` environment variables."
                 )
 
+        env_secret_name: str | None = None
+        if settings.worker.store_env_as_secret:
+            env_secret_name = await self._store_env_as_secret(
+                configuration=configuration, client=client
+            )
+
         try:
             batch_client = BatchV1Api(client)
-            job = await batch_client.create_namespaced_job(
-                configuration.namespace,
-                configuration.job_manifest,
-            )
+            retry_settings = settings.worker.create_job_retry
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(retry_settings.max_retries),
+                wait=wait_fixed(retry_settings.delay_seconds)
+                + wait_random(
+                    retry_settings.jitter_min_seconds,
+                    retry_settings.jitter_max_seconds,
+                ),
+                reraise=True,
+            ):
+                with attempt:
+                    job = await batch_client.create_namespaced_job(
+                        configuration.namespace,
+                        configuration.job_manifest,
+                    )
         except kubernetes_asyncio.client.exceptions.ApiException as exc:
+            # Clean up the orphaned env Secret if Job creation failed
+            if env_secret_name:
+                try:
+                    core_client = CoreV1Api(client)
+                    await core_client.delete_namespaced_secret(
+                        name=env_secret_name,
+                        namespace=configuration.namespace,
+                    )
+                except Exception:
+                    self._logger.warning(
+                        "Failed to clean up env secret %r after Job creation failure",
+                        env_secret_name,
+                    )
+
             # Parse the reason and message from the response if feasible
             message = ""
             if exc.reason:
@@ -942,11 +1144,171 @@ class KubernetesWorker(
             if exc.body and "message" in (body := json.loads(exc.body)):
                 message += ": " + body["message"]
 
+            if hint := self._get_k8s_error_hint(exc, configuration.namespace):
+                message += f". Hint: {hint}"
+
             raise InfrastructureError(
                 f"Unable to create Kubernetes job{message}"
             ) from exc
 
+        if env_secret_name:
+            try:
+                await self._set_secret_owner_reference(
+                    secret_name=env_secret_name,
+                    namespace=configuration.namespace,
+                    job=job,
+                    client=client,
+                )
+            except Exception:
+                self._logger.warning(
+                    "Failed to set owner reference on env secret %r; "
+                    "it will not be automatically cleaned up when the Job is deleted",
+                    env_secret_name,
+                )
+
         return job
+
+    async def _store_env_as_secret(
+        self,
+        configuration: KubernetesWorkerJobConfiguration,
+        client: "ApiClient",
+    ) -> str | None:
+        """Moves plaintext env vars from the Job manifest into a per-job Secret.
+
+        Returns the name of the created Secret, or None if there were no
+        plaintext env vars to store.
+        """
+        container = configuration.job_manifest["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        manifest_env: list[dict[str, Any]] = container.get("env", [])
+
+        # Separate plain-value entries from valueFrom entries
+        plain_env: dict[str, str] = {}
+        value_from_entries: list[dict[str, Any]] = []
+        for entry in manifest_env:
+            if "valueFrom" in entry:
+                value_from_entries.append(entry)
+            elif "value" in entry and entry.get("name"):
+                plain_env[entry["name"]] = entry["value"]
+
+        if not plain_env:
+            return None
+
+        # Derive secret name from the Job's generateName
+        generate_name = configuration.job_manifest["metadata"].get(
+            "generateName", "prefect-job-"
+        )
+        # Strip trailing hyphen for cleaner naming
+        base_name = generate_name.rstrip("-")
+        short_id = uuid.uuid4().hex[:8]
+        secret_name = f"{base_name}-env-{short_id}"
+
+        # Create the Secret
+        secret = await self._create_env_secret(
+            name=secret_name,
+            env_vars=plain_env,
+            namespace=configuration.namespace,
+            client=client,
+            labels=configuration.job_manifest["metadata"].get("labels", {}),
+        )
+
+        # Rewrite the manifest: keep only valueFrom entries in env
+        container["env"] = value_from_entries
+
+        # Append envFrom.secretRef (preserving any existing envFrom entries)
+        existing_env_from: list[dict[str, Any]] = container.get("envFrom", [])
+        container["envFrom"] = [
+            *existing_env_from,
+            {"secretRef": {"name": secret.metadata.name}},
+        ]
+
+        return secret.metadata.name
+
+    async def _create_env_secret(
+        self,
+        name: str,
+        env_vars: dict[str, str],
+        namespace: str,
+        client: "ApiClient",
+        labels: dict[str, str] | None = None,
+    ) -> "V1Secret":
+        """Creates a Kubernetes Secret containing the given env var key-value pairs."""
+        core_client = CoreV1Api(client)
+        secret_labels = {"app.kubernetes.io/managed-by": "prefect"}
+        if labels:
+            # Propagate the flow-run-id label for auditability
+            flow_run_id = labels.get("prefect.io/flow-run-id")
+            if flow_run_id:
+                secret_labels["prefect.io/flow-run-id"] = flow_run_id
+
+        metadata = V1ObjectMeta(
+            name=name,
+            namespace=namespace,
+            labels=secret_labels,
+        )
+        # Secret string_data is automatically base64-encoded by the K8s API
+        secret = V1Secret(
+            api_version="v1",
+            kind="Secret",
+            metadata=metadata,
+            string_data=env_vars,
+        )
+        return await core_client.create_namespaced_secret(
+            namespace=namespace, body=secret
+        )
+
+    async def _set_secret_owner_reference(
+        self,
+        secret_name: str,
+        namespace: str,
+        job: "V1Job",
+        client: "ApiClient",
+    ) -> None:
+        """Patches the Secret to set the Job as its owner for automatic GC."""
+        core_client = CoreV1Api(client)
+        body = {
+            "metadata": {
+                "ownerReferences": [
+                    {
+                        "apiVersion": "batch/v1",
+                        "kind": "Job",
+                        "name": job.metadata.name,
+                        "uid": job.metadata.uid,
+                    }
+                ]
+            }
+        }
+        await core_client.patch_namespaced_secret(
+            name=secret_name,
+            namespace=namespace,
+            body=body,
+        )
+
+    @staticmethod
+    def _get_k8s_error_hint(
+        exc: "kubernetes_asyncio.client.exceptions.ApiException",
+        namespace: str,
+    ) -> str | None:
+        status = exc.status
+        reason = (exc.reason or "").lower()
+        raw_body = exc.body or ""
+        body_str = (
+            raw_body.decode("utf-8", errors="replace")
+            if isinstance(raw_body, bytes)
+            else raw_body
+        ).lower()
+
+        if "quota" in body_str or "exceeded" in body_str:
+            return "Check the resource quotas for the namespace and ensure the job does not exceed them."
+
+        if status == 403 or "forbidden" in reason:
+            return "Check that your service account has the required RBAC permissions for this operation."
+
+        if status == 404 and namespace and namespace.lower() in body_str:
+            return f"Verify that the namespace '{namespace}' exists in the cluster."
+
+        return None
 
     async def _upsert_secret(
         self, name: str, value: str, namespace: str, client: "ApiClient"

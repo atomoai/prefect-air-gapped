@@ -8,6 +8,8 @@ import sqlalchemy as sa
 from prefect.server import models, schemas
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture
 async def many_flow_run_states(flow, session, db):
@@ -621,9 +623,11 @@ class TestExpectedStartTimeDelta:
         )
         estimated_start_time_delta = result.scalar()
 
-        # allow for some wiggle room in the time delta
-        assert (estimated_start_time_delta - lateness) <= datetime.timedelta(seconds=1)
-        assert (now() - dt - lateness) <= datetime.timedelta(seconds=1)
+        # allow for some wiggle room in the time delta to allow for slow tests
+        wiggle_room = datetime.timedelta(seconds=5)
+
+        assert (estimated_start_time_delta - lateness) <= wiggle_room
+        assert (now() - dt - lateness) <= wiggle_room
 
     async def test_flow_run_lateness_when_pending(self, session, flow, db):
         lateness = datetime.timedelta(seconds=60)
@@ -697,15 +701,18 @@ class TestExpectedStartTimeDelta:
             ),
         )
 
-        # final states remove lateness even if the run never started
-        assert fr.estimated_start_time_delta == datetime.timedelta(seconds=0)
+        # When a flow transitions directly to a terminal state without running,
+        # start_time is now set to the terminal state timestamp. This means
+        # lateness is calculated as (start_time - expected_start_time).
+        # In this case: (dt + 5s) - dt = 5 seconds
+        assert fr.estimated_start_time_delta == datetime.timedelta(seconds=5)
 
         # check SQL logic
         await session.commit()
         result = await session.execute(
             sa.select(db.FlowRun.estimated_start_time_delta).filter_by(id=fr.id)
         )
-        assert result.scalar() == datetime.timedelta(seconds=0)
+        assert result.scalar() == datetime.timedelta(seconds=5)
 
     async def test_flow_run_lateness_is_zero_when_early(self, session, flow, db):
         dt = now("UTC") - datetime.timedelta(minutes=1)

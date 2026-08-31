@@ -281,8 +281,9 @@ class FlowRunClient(BaseClient):
             work_pool_filter: filter criteria for work pools
             work_queue_filter: filter criteria for work pool queues
             sort: sort criteria for the flow runs
-            limit: limit for the flow run query
-            offset: offset for the flow run query
+            limit: maximum number of flow runs to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the flow run query.
 
         Returns:
             a list of Flow Run model representations
@@ -415,6 +416,34 @@ class FlowRunClient(BaseClient):
         )
         return result
 
+    def read_flow_run_state(self, flow_run_state_id: "UUID") -> "State":
+        """
+        Read a flow run state by ID.
+
+        Args:
+            flow_run_state_id: The flow run state ID.
+
+        Returns:
+            A State model representation of the flow run state.
+
+        Raises:
+            ObjectNotFound: If the flow run state does not exist.
+        """
+        try:
+            response = self.request(
+                "GET",
+                "/flow_run_states/{id}",
+                path_params={"id": flow_run_state_id},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ObjectNotFound(http_exc=exc) from exc
+            raise
+
+        from prefect.states import State
+
+        return State.model_validate(response.json())
+
     def read_flow_run_states(self, flow_run_id: "UUID") -> "list[State]":
         """
         Query for the states of a flow run
@@ -456,6 +485,7 @@ class FlowRunClient(BaseClient):
             value: The input value.
             sender: The sender of the input.
         """
+        from prefect.client.schemas.objects import FlowRunInput
 
         # Initialize the input to ensure that the key is valid.
         FlowRunInput(flow_run_id=flow_run_id, key=key, value=value)
@@ -779,8 +809,9 @@ class FlowRunAsyncClient(BaseAsyncClient):
             work_pool_filter: filter criteria for work pools
             work_queue_filter: filter criteria for work pool queues
             sort: sort criteria for the flow runs
-            limit: limit for the flow run query
-            offset: offset for the flow run query
+            limit: maximum number of flow runs to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the flow run query.
 
         Returns:
             a list of Flow Run model representations
@@ -912,6 +943,34 @@ class FlowRunAsyncClient(BaseAsyncClient):
             response.json()
         )
         return result
+
+    async def read_flow_run_state(self, flow_run_state_id: "UUID") -> "State":
+        """
+        Read a flow run state by ID.
+
+        Args:
+            flow_run_state_id: The flow run state ID.
+
+        Returns:
+            A State model representation of the flow run state.
+
+        Raises:
+            ObjectNotFound: If the flow run state does not exist.
+        """
+        try:
+            response = await self.request(
+                "GET",
+                "/flow_run_states/{id}",
+                path_params={"id": flow_run_state_id},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ObjectNotFound(http_exc=exc) from exc
+            raise
+
+        from prefect.states import State
+
+        return State.model_validate(response.json())
 
     async def read_flow_run_states(self, flow_run_id: "UUID") -> "list[State]":
         """

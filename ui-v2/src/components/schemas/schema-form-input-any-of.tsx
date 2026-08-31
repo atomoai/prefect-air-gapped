@@ -1,7 +1,6 @@
 import type { ReferenceObject, SchemaObject } from "openapi-typescript";
-import { useRef, useState } from "react";
-import { Card } from "../ui/card";
-import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
+import { useEffect, useRef, useState } from "react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { SchemaFormProperty } from "./schema-form-property";
 import type { SchemaFormErrors } from "./types/errors";
 import { useSchemaFormContext } from "./use-schema-form-context";
@@ -25,9 +24,27 @@ export function SchemaFormInputAnyOf({
 		getIndexForAnyOfPropertyValue({ value, property, schema }),
 	);
 	const values = useRef(new Map<number, unknown>());
+	const emittedValue = useRef<{ value: unknown } | undefined>(undefined);
+
+	useEffect(() => {
+		if (emittedValue.current && Object.is(emittedValue.current.value, value)) {
+			emittedValue.current = undefined;
+			return;
+		}
+
+		emittedValue.current = undefined;
+		setSelectedIndex(
+			getIndexForAnyOfPropertyValue({ value, property, schema }),
+		);
+	}, [property, schema, value]);
+
+	function emitValue(newValue: unknown) {
+		emittedValue.current = { value: newValue };
+		onValueChange(newValue);
+	}
 
 	function onSelectedIndexChange(newSelectedIndexValue: string) {
-		const newSelectedIndex = Number.parseInt(newSelectedIndexValue);
+		const newSelectedIndex = Number.parseInt(newSelectedIndexValue, 10);
 
 		if (Number.isNaN(newSelectedIndex)) {
 			throw new Error(`Invalid index: ${newSelectedIndexValue}`);
@@ -37,41 +54,37 @@ export function SchemaFormInputAnyOf({
 
 		setSelectedIndex(newSelectedIndex);
 
-		onValueChange(values.current.get(newSelectedIndex));
+		emitValue(values.current.get(newSelectedIndex));
 	}
 
 	return (
-		<div className="grid grid-cols-1 gap-2">
-			<ToggleGroup
-				size="sm"
-				variant="outline"
-				type="single"
-				value={selectedIndex.toString()}
-				onValueChange={onSelectedIndexChange}
-				className="justify-start"
-			>
+		<Tabs
+			value={selectedIndex.toString()}
+			onValueChange={onSelectedIndexChange}
+		>
+			<TabsList>
 				{property.anyOf.map((option, index) => {
 					const label = getSchemaObjectLabel(option, schema);
 					return (
-						<ToggleGroupItem key={label} value={index.toString()}>
+						<TabsTrigger key={label} value={index.toString()}>
 							{label}
-						</ToggleGroupItem>
+						</TabsTrigger>
 					);
 				})}
-			</ToggleGroup>
+			</TabsList>
 
-			<Card className="p-2">
+			<TabsContent value={selectedIndex.toString()}>
 				<SchemaFormProperty
+					key={selectedIndex}
 					value={value}
 					property={property.anyOf[selectedIndex]}
-					onValueChange={onValueChange}
+					onValueChange={emitValue}
 					errors={errors}
 					showLabel={false}
 					nested={false}
-					// This form property is nested within the anyOf property, so hard coding required to false because the anyOf property itself is what can be required
 					required={false}
 				/>
-			</Card>
-		</div>
+			</TabsContent>
+		</Tabs>
 	);
 }

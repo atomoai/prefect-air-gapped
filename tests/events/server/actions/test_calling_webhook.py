@@ -39,6 +39,8 @@ from prefect.server.schemas.core import Deployment, Flow, FlowRun, WorkQueue
 from prefect.types import DateTime
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture
 async def snap_a_pic(
@@ -358,6 +360,9 @@ async def test_success_event(
     webhook_call.return_value = Response(status_code=200, text="🦊")
     monkeypatch.setattr("prefect.blocks.webhook.Webhook.call", webhook_call)
 
+    # Ignore lifecycle events emitted while creating the webhook block fixtures
+    AssertingEventsClient.reset()
+
     await action.act(call_webhook)
     await action.succeed(call_webhook)
 
@@ -384,6 +389,7 @@ async def test_success_event(
     (triggered_event, executed_event) = AssertingEventsClient.last.events
 
     assert triggered_event.event == "prefect.automation.action.triggered"
+    assert call_webhook.triggering_event is not None
     assert triggered_event.related == [
         RelatedResource.model_validate(
             {
@@ -396,6 +402,12 @@ async def test_success_event(
             {
                 "prefect.resource.id": "prefect.block-type.webhook",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{call_webhook.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]
@@ -418,6 +430,12 @@ async def test_success_event(
             {
                 "prefect.resource.id": "prefect.block-type.webhook",
                 "prefect.resource.role": "block-type",
+            }
+        ),
+        RelatedResource.model_validate(
+            {
+                "prefect.resource.id": f"prefect.event.{call_webhook.triggering_event.id}",
+                "prefect.resource.role": "triggering-event",
             }
         ),
     ]

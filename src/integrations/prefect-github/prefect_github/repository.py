@@ -8,8 +8,8 @@ GitHub query_repository* tasks and the GitHub storage block.
 # is outdated, rerun scripts/generate.py.
 
 import io
-import shlex
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,8 +20,9 @@ from pydantic import Field
 from sgqlc.operation import Operation
 
 from prefect import task
+from prefect._internal.compatibility.async_dispatch import async_dispatch
+from prefect._internal.urls import strip_auth_from_urls_in_text
 from prefect.filesystems import ReadableDeploymentStorage
-from prefect.utilities.asyncutils import sync_compatible
 from prefect.utilities.processutils import run_process
 from prefect_github import GitHubCredentials
 from prefect_github.graphql import _execute_graphql_op, _subset_return_fields
@@ -65,7 +66,11 @@ class GitHubRepository(ReadableDeploymentStorage):
         All other repos should be the same as `self.repository`.
         """
         url_components = urlparse(self.repository_url)
-        if url_components.scheme == "https" and self.credentials is not None:
+        if (
+            url_components.scheme == "https"
+            and self.credentials is not None
+            and self.credentials.token is not None
+        ):
             token_value = self.credentials.token.get_secret_value()
             updated_components = url_components._replace(
                 netloc=f"{token_value}@{url_components.netloc}"
@@ -75,6 +80,11 @@ class GitHubRepository(ReadableDeploymentStorage):
             full_url = self.repository_url
 
         return full_url
+
+    def _git_error_extra_secrets(self) -> list[str]:
+        if self.credentials is None or self.credentials.token is None:
+            return []
+        return [self.credentials.token.get_secret_value()]
 
     @staticmethod
     def _get_paths(
@@ -96,8 +106,55 @@ class GitHubRepository(ReadableDeploymentStorage):
 
         return str(content_source), str(content_destination)
 
-    @sync_compatible
-    async def get_directory(
+    async def aget_directory(
+        self, from_path: Optional[str] = None, local_path: Optional[str] = None
+    ) -> None:
+        """
+        Clones a GitHub project specified in `from_path` to the provided `local_path`;
+        defaults to cloning the repository reference configured on the Block to the
+        present working directory. Async version.
+
+        Args:
+            from_path: If provided, interpreted as a subdirectory of the underlying
+                repository that will be copied to the provided local path.
+            local_path: A local path to clone to; defaults to present working directory.
+        """
+        # CONSTRUCT COMMAND
+        cmd = ["git", "clone", self._create_repo_url()]
+        if self.reference:
+            cmd += ["-b", self.reference]
+
+        # Limit git history
+        cmd += ["--depth", "1"]
+
+        # Clone to a temporary directory and move the subdirectory over
+        with TemporaryDirectory(suffix="prefect") as tmp_dir:
+            tmp_path_str = tmp_dir
+            cmd.append(tmp_path_str)
+
+            err_stream = io.StringIO()
+            out_stream = io.StringIO()
+            process = await run_process(cmd, stream_output=(out_stream, err_stream))
+            if process.returncode != 0:
+                err_stream.seek(0)
+                sanitized_error = strip_auth_from_urls_in_text(
+                    err_stream.read(), extra_secrets=self._git_error_extra_secrets()
+                )
+                raise RuntimeError(f"Failed to pull from remote:\n {sanitized_error}")
+
+            content_source, content_destination = self._get_paths(
+                dst_dir=local_path, src_dir=tmp_path_str, sub_directory=from_path
+            )
+
+            shutil.copytree(
+                src=content_source,
+                dst=content_destination,
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+
+    @async_dispatch(aget_directory)
+    def get_directory(
         self, from_path: Optional[str] = None, local_path: Optional[str] = None
     ) -> None:
         """
@@ -110,34 +167,32 @@ class GitHubRepository(ReadableDeploymentStorage):
                 repository that will be copied to the provided local path.
             local_path: A local path to clone to; defaults to present working directory.
         """
-        # CONSTRUCT COMMAND
-        cmd = f"git clone {self._create_repo_url()}"
+        cmd = ["git", "clone", self._create_repo_url()]
         if self.reference:
-            cmd += f" -b {self.reference}"
+            cmd += ["-b", self.reference]
 
-        # Limit git history
-        cmd += " --depth 1"
+        cmd += ["--depth", "1"]
 
-        # Clone to a temporary directory and move the subdirectory over
         with TemporaryDirectory(suffix="prefect") as tmp_dir:
             tmp_path_str = tmp_dir
-            # wrap the directory with quotes, because shlex removes windows-style slashes "//" - fixes issue 13180
-            cmd += f' "{tmp_path_str}"'
-            cmd = shlex.split(cmd)
+            cmd.append(tmp_path_str)
 
-            err_stream = io.StringIO()
-            out_stream = io.StringIO()
-            process = await run_process(cmd, stream_output=(out_stream, err_stream))
-            if process.returncode != 0:
-                err_stream.seek(0)
-                raise RuntimeError(f"Failed to pull from remote:\n {err_stream.read()}")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                sanitized_error = strip_auth_from_urls_in_text(
+                    result.stderr, extra_secrets=self._git_error_extra_secrets()
+                )
+                raise RuntimeError(f"Failed to pull from remote:\n {sanitized_error}")
 
             content_source, content_destination = self._get_paths(
                 dst_dir=local_path, src_dir=tmp_path_str, sub_directory=from_path
             )
 
             shutil.copytree(
-                src=content_source, dst=content_destination, dirs_exist_ok=True
+                src=content_source,
+                dst=content_destination,
+                dirs_exist_ok=True,
+                symlinks=True,
             )
 
 

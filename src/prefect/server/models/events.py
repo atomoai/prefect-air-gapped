@@ -291,6 +291,91 @@ def _timing_is_tight(
     return False
 
 
+async def _deployment_related_resources(
+    session: AsyncSession,
+    deployment: ORMDeployment,
+) -> RelatedResourceList:
+    """Get related resources (flow, work-queue, work-pool) for a deployment event."""
+    related: RelatedResourceList = []
+
+    flow = await models.flows.read_flow(session=session, flow_id=deployment.flow_id)
+    if flow is not None:
+        related.append(
+            {
+                "prefect.resource.id": f"prefect.flow.{flow.id}",
+                "prefect.resource.name": flow.name,
+                "prefect.resource.role": "flow",
+            }
+        )
+
+    work_queue = (
+        await models.workers.read_work_queue(
+            session=session,
+            work_queue_id=deployment.work_queue_id,
+        )
+        if deployment.work_queue_id
+        else None
+    )
+    if work_queue is not None:
+        related.append(
+            {
+                "prefect.resource.id": f"prefect.work-queue.{work_queue.id}",
+                "prefect.resource.name": work_queue.name,
+                "prefect.resource.role": "work-queue",
+            }
+        )
+
+    work_pool = (
+        await models.workers.read_work_pool(
+            session=session,
+            work_pool_id=work_queue.work_pool_id,
+        )
+        if work_queue and work_queue.work_pool_id
+        else None
+    )
+    if work_pool is not None:
+        related.append(
+            {
+                "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
+                "prefect.resource.name": work_pool.name,
+                "prefect.work-pool.type": work_pool.type,
+                "prefect.resource.role": "work-pool",
+            }
+        )
+
+    if deployment.storage_document_id:
+        related.append(
+            {
+                "prefect.resource.id": (
+                    f"prefect.block-document.{deployment.storage_document_id}"
+                ),
+                "prefect.resource.role": "storage",
+            }
+        )
+
+    if deployment.infrastructure_document_id:
+        related.append(
+            {
+                "prefect.resource.id": (
+                    f"prefect.block-document.{deployment.infrastructure_document_id}"
+                ),
+                "prefect.resource.role": "infrastructure",
+            }
+        )
+
+    if deployment.concurrency_limit_id:
+        related.append(
+            {
+                "prefect.resource.id": (
+                    f"prefect.concurrency-limit.{deployment.concurrency_limit_id}"
+                ),
+                "prefect.resource.role": "concurrency-limit",
+            }
+        )
+
+    return related
+
+
 async def deployment_status_event(
     session: AsyncSession,
     deployment_id: UUID,
@@ -301,54 +386,6 @@ async def deployment_status_event(
         session=session, deployment_id=deployment_id
     )
     assert deployment
-    flow = await models.flows.read_flow(session=session, flow_id=deployment.flow_id)
-    work_queue = (
-        await models.workers.read_work_queue(
-            session=session,
-            work_queue_id=deployment.work_queue_id,
-        )
-        if deployment.work_queue_id
-        else None
-    )
-
-    work_pool = (
-        await models.workers.read_work_pool(
-            session=session,
-            work_pool_id=work_queue.work_pool_id,
-        )
-        if work_queue and work_queue.work_pool_id
-        else None
-    )
-
-    related_work_queue_and_pool_info = []
-
-    if flow is not None:
-        related_work_queue_and_pool_info.append(
-            {
-                "prefect.resource.id": f"prefect.flow.{flow.id}",
-                "prefect.resource.name": flow.name,
-                "prefect.resource.role": "flow",
-            }
-        )
-
-    if work_queue is not None:
-        related_work_queue_and_pool_info.append(
-            {
-                "prefect.resource.id": f"prefect.work-queue.{work_queue.id}",
-                "prefect.resource.name": work_queue.name,
-                "prefect.resource.role": "work-queue",
-            }
-        )
-
-    if work_pool is not None:
-        related_work_queue_and_pool_info.append(
-            {
-                "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
-                "prefect.resource.name": work_pool.name,
-                "prefect.work-pool.type": work_pool.type,
-                "prefect.resource.role": "work-pool",
-            }
-        )
 
     return Event(
         occurred=occurred,
@@ -357,7 +394,66 @@ async def deployment_status_event(
             "prefect.resource.id": f"prefect.deployment.{deployment.id}",
             "prefect.resource.name": f"{deployment.name}",
         },
-        related=related_work_queue_and_pool_info,
+        related=await _deployment_related_resources(session, deployment),
+        id=uuid7(),
+    )
+
+
+async def deployment_created_event(
+    session: AsyncSession,
+    deployment: ORMDeployment,
+    occurred: DateTime,
+) -> Event:
+    """Create an event for deployment creation."""
+    return Event(
+        occurred=occurred,
+        event="prefect.deployment.created",
+        resource={
+            "prefect.resource.id": f"prefect.deployment.{deployment.id}",
+            "prefect.resource.name": deployment.name,
+        },
+        related=await _deployment_related_resources(session, deployment),
+        id=uuid7(),
+    )
+
+
+async def deployment_updated_event(
+    session: AsyncSession,
+    deployment: ORMDeployment,
+    changed_fields: Dict[str, Dict[str, Any]],
+    occurred: DateTime,
+) -> Event:
+    """Create an event for deployment field updates."""
+    return Event(
+        occurred=occurred,
+        event="prefect.deployment.updated",
+        resource={
+            "prefect.resource.id": f"prefect.deployment.{deployment.id}",
+            "prefect.resource.name": deployment.name,
+        },
+        related=await _deployment_related_resources(session, deployment),
+        payload={
+            "updated_fields": list(changed_fields.keys()),
+            "updates": changed_fields,
+        },
+        id=uuid7(),
+    )
+
+
+async def deployment_deleted_event(
+    session: AsyncSession,
+    deployment: ORMDeployment,
+    occurred: DateTime,
+) -> Event:
+    """Create an event for deployment deletion."""
+    return Event(
+        occurred=occurred,
+        event="prefect.deployment.deleted",
+        resource={
+            "prefect.resource.id": f"prefect.deployment.{deployment.id}",
+            "prefect.resource.name": deployment.name,
+        },
+        related=await _deployment_related_resources(session, deployment),
         id=uuid7(),
     )
 
@@ -416,6 +512,202 @@ async def work_pool_status_event(
             "prefect.work-pool.type": work_pool.type,
         },
         follows=_get_recent_preceding_work_pool_event_id(pre_update_work_pool),
+    )
+
+
+async def work_pool_updated_event(
+    session: AsyncSession,
+    work_pool: "ORMWorkPool",
+    changed_fields: Dict[
+        str, Dict[str, Any]
+    ],  # {"field_name": {"from": value, "to": value}}
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work pool field updates (non-status)."""
+    return Event(
+        occurred=occurred,
+        event="prefect.work-pool.updated",
+        resource={
+            "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
+            "prefect.resource.name": work_pool.name,
+            "prefect.work-pool.type": work_pool.type,
+            "prefect.resource.role": "work-pool",
+        },
+        payload={
+            "updated_fields": list(changed_fields.keys()),
+            "updates": changed_fields,
+        },
+        id=uuid7(),
+    )
+
+
+async def work_queue_updated_event(
+    session: AsyncSession,
+    work_queue: "ORMWorkQueue",
+    changed_fields: Dict[str, Dict[str, Any]],
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work queue field updates (non-status)."""
+    related_work_pool_info: List[Dict[str, Any]] = []
+
+    if work_queue.work_pool_id:
+        work_pool = await models.workers.read_work_pool(
+            session=session,
+            work_pool_id=work_queue.work_pool_id,
+        )
+        if work_pool and work_pool.id and work_pool.name:
+            related_work_pool_info.append(
+                {
+                    "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
+                    "prefect.resource.name": work_pool.name,
+                    "prefect.work-pool.type": work_pool.type,
+                    "prefect.resource.role": "work-pool",
+                }
+            )
+
+    return Event(
+        occurred=occurred,
+        event="prefect.work-queue.updated",
+        resource={
+            "prefect.resource.id": f"prefect.work-queue.{work_queue.id}",
+            "prefect.resource.name": work_queue.name,
+            "prefect.resource.role": "work-queue",
+        },
+        related=related_work_pool_info,
+        payload={
+            "updated_fields": list(changed_fields.keys()),
+            "updates": changed_fields,
+        },
+        id=uuid7(),
+    )
+
+
+def _work_pool_related_resources(work_pool: "ORMWorkPool") -> RelatedResourceList:
+    """The work pool's default queue and result-storage block as related
+    resources, each with a role naming its relationship to the pool."""
+    related: RelatedResourceList = []
+
+    if work_pool.default_queue_id:
+        related.append(
+            {
+                "prefect.resource.id": (
+                    f"prefect.work-queue.{work_pool.default_queue_id}"
+                ),
+                "prefect.resource.role": "default-queue",
+            }
+        )
+
+    storage_configuration = work_pool.storage_configuration
+    result_storage_block_id = getattr(
+        storage_configuration, "default_result_storage_block_id", None
+    )
+    if result_storage_block_id:
+        related.append(
+            {
+                "prefect.resource.id": (
+                    f"prefect.block-document.{result_storage_block_id}"
+                ),
+                "prefect.resource.role": "result-storage",
+            }
+        )
+
+    return related
+
+
+def _work_pool_resource(work_pool: "ORMWorkPool") -> Dict[str, str]:
+    return {
+        "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
+        "prefect.resource.name": work_pool.name,
+        "prefect.work-pool.type": work_pool.type,
+        "prefect.resource.role": "work-pool",
+    }
+
+
+async def work_pool_created_event(
+    work_pool: "ORMWorkPool",
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work pool creation."""
+    return Event(
+        occurred=occurred,
+        event="prefect.work-pool.created",
+        resource=_work_pool_resource(work_pool),
+        related=_work_pool_related_resources(work_pool),
+        id=uuid7(),
+    )
+
+
+async def work_pool_deleted_event(
+    work_pool: "ORMWorkPool",
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work pool deletion."""
+    return Event(
+        occurred=occurred,
+        event="prefect.work-pool.deleted",
+        resource=_work_pool_resource(work_pool),
+        related=_work_pool_related_resources(work_pool),
+        id=uuid7(),
+    )
+
+
+async def _work_queue_work_pool_related(
+    session: AsyncSession,
+    work_queue: "ORMWorkQueue",
+) -> List[Dict[str, Any]]:
+    related: List[Dict[str, Any]] = []
+    if work_queue.work_pool_id:
+        work_pool = await models.workers.read_work_pool(
+            session=session,
+            work_pool_id=work_queue.work_pool_id,
+        )
+        if work_pool and work_pool.id and work_pool.name:
+            related.append(
+                {
+                    "prefect.resource.id": f"prefect.work-pool.{work_pool.id}",
+                    "prefect.resource.name": work_pool.name,
+                    "prefect.work-pool.type": work_pool.type,
+                    "prefect.resource.role": "work-pool",
+                }
+            )
+    return related
+
+
+async def work_queue_created_event(
+    session: AsyncSession,
+    work_queue: "ORMWorkQueue",
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work queue creation."""
+    return Event(
+        occurred=occurred,
+        event="prefect.work-queue.created",
+        resource={
+            "prefect.resource.id": f"prefect.work-queue.{work_queue.id}",
+            "prefect.resource.name": work_queue.name,
+            "prefect.resource.role": "work-queue",
+        },
+        related=await _work_queue_work_pool_related(session, work_queue),
+        id=uuid7(),
+    )
+
+
+async def work_queue_deleted_event(
+    session: AsyncSession,
+    work_queue: "ORMWorkQueue",
+    occurred: DateTime,
+) -> Event:
+    """Create an event for work queue deletion."""
+    return Event(
+        occurred=occurred,
+        event="prefect.work-queue.deleted",
+        resource={
+            "prefect.resource.id": f"prefect.work-queue.{work_queue.id}",
+            "prefect.resource.name": work_queue.name,
+            "prefect.resource.role": "work-queue",
+        },
+        related=await _work_queue_work_pool_related(session, work_queue),
+        id=uuid7(),
     )
 
 

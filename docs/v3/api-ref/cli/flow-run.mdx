@@ -48,7 +48,6 @@ View details about a flow run.
 
 <Accordion title="Arguments" defaultOpen>
 <ResponseField name="ID" type="string" required>
-    \[required]
 </ResponseField>
 </Accordion>
 
@@ -82,26 +81,6 @@ prefect flow-run ls [OPTIONS]
 
 <Info>
 View recent flow runs or flow runs for specific flows.
-
-Arguments:
-
-    flow_name: Name of the flow
-
-    limit: Maximum number of flow runs to list. Defaults to 15.
-
-    state: Name of the flow run's state. Can be provided multiple times. Options are 'SCHEDULED', 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CRASHED', 'CANCELLING', 'CANCELLED', 'PAUSED', 'SUSPENDED', 'AWAITINGRETRY', 'RETRYING', and 'LATE'.
-
-    state_type: Type of the flow run's state. Can be provided multiple times. Options are 'SCHEDULED', 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'CRASHED', 'CANCELLING', 'CANCELLED', 'CRASHED', and 'PAUSED'.
-
-Examples:
-
-\$ prefect flow-runs ls --state Running
-
-\$ prefect flow-runs ls --state Running --state late
-
-\$ prefect flow-runs ls --state-type RUNNING
-
-\$ prefect flow-runs ls --state-type RUNNING --state-type FAILED
 </Info>
 
 
@@ -132,9 +111,26 @@ Examples:
     Type of the flow run's state
 </ResponseField>
 
+<ResponseField name="--output">
+    Specify an output format. Currently supports: json
+</ResponseField>
+
 </Accordion>
 
 </AccordionGroup>
+
+
+<Note>
+**Example:**
+
+```bash
+$ prefect flow-runs ls --state Running
+$ prefect flow-runs ls --state Running --state late
+$ prefect flow-runs ls --state-type RUNNING
+$ prefect flow-runs ls --state-type RUNNING --state-type FAILED
+```
+</Note>
+
 
 
 
@@ -162,7 +158,6 @@ Delete a flow run by ID.
 
 <Accordion title="Arguments" defaultOpen>
 <ResponseField name="ID" type="string" required>
-    \[required]
 </ResponseField>
 </Accordion>
 
@@ -196,13 +191,72 @@ Cancel a flow run by ID.
 
 <Accordion title="Arguments" defaultOpen>
 <ResponseField name="ID" type="string" required>
-    \[required]
 </ResponseField>
 </Accordion>
 
 
 
 </AccordionGroup>
+
+
+
+## `prefect flow-run retry`
+
+
+
+```command
+prefect flow-run retry [OPTIONS] ID_OR_NAME
+```
+
+
+
+<Info>
+Retry a failed or completed flow run.
+
+The flow run can be specified by either its UUID or its name. If multiple
+flow runs have the same name, you must use the UUID to disambiguate.
+
+If the flow run has an associated deployment, it will be scheduled for retry
+and a worker will pick it up. If there is no deployment, you must provide
+an --entrypoint to the flow code, and the flow will execute locally.
+</Info>
+
+
+
+
+
+
+<AccordionGroup>
+
+
+<Accordion title="Arguments" defaultOpen>
+<ResponseField name="ID_OR_NAME" type="string" required>
+</ResponseField>
+</Accordion>
+
+
+
+<Accordion title="Options" defaultOpen>
+
+<ResponseField name="--entrypoint">
+    The path to a file containing the flow to run, and the name of the flow function, in the format `path/to/file.py:flow_function_name`. Required if the flow run does not have an associated deployment.
+</ResponseField>
+
+</Accordion>
+
+</AccordionGroup>
+
+
+<Note>
+**Example:**
+
+```bash
+$ prefect flow-run retry abc123-def456-7890-...
+$ prefect flow-run retry my-flow-run-name
+$ prefect flow-run retry abc123 --entrypoint ./flows/my_flow.py:my_flow
+```
+</Note>
+
 
 
 
@@ -230,7 +284,6 @@ View logs for a flow run.
 
 <Accordion title="Arguments" defaultOpen>
 <ResponseField name="ID" type="string" required>
-    \[required]
 </ResponseField>
 </Accordion>
 
@@ -254,6 +307,51 @@ View logs for a flow run.
     Show the last 20 logs instead of all logs.
 </ResponseField>
 
+<ResponseField name="--output">
+    Specify an output format. Currently supports: json
+</ResponseField>
+
+</Accordion>
+
+</AccordionGroup>
+
+
+
+## `prefect flow-run watch`
+
+
+
+```command
+prefect flow-run watch [OPTIONS] ID
+```
+
+
+
+<Info>
+Watch a flow run until it reaches a terminal state.
+</Info>
+
+
+
+
+
+
+<AccordionGroup>
+
+
+<Accordion title="Arguments" defaultOpen>
+<ResponseField name="ID" type="string" required>
+</ResponseField>
+</Accordion>
+
+
+
+<Accordion title="Options" defaultOpen>
+
+<ResponseField name="--timeout">
+    Timeout in seconds.
+</ResponseField>
+
 </Accordion>
 
 </AccordionGroup>
@@ -271,7 +369,7 @@ prefect flow-run execute [OPTIONS] [ID]
 
 
 <Info>
-
+Execute a flow run by ID.
 </Info>
 
 
@@ -284,7 +382,6 @@ prefect flow-run execute [OPTIONS] [ID]
 
 <Accordion title="Arguments" defaultOpen>
 <ResponseField name="ID" type="string">
-    ID of the flow run to execute
 </ResponseField>
 </Accordion>
 

@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import gc
 import inspect
 import json
 import logging
@@ -7,6 +8,7 @@ import random
 import sys
 import threading
 import time
+import weakref
 from asyncio import Event, sleep
 from functools import partial
 from pathlib import Path
@@ -42,7 +44,7 @@ from prefect.exceptions import (
     ReservedArgumentError,
 )
 from prefect.filesystems import LocalFileSystem
-from prefect.futures import PrefectDistributedFuture, PrefectFuture
+from prefect.futures import PrefectDistributedFuture, PrefectFuture, PrefectFutureList
 from prefect.locking.filesystem import FileSystemLockManager
 from prefect.locking.memory import MemoryLockManager
 from prefect.logging import get_run_logger
@@ -61,7 +63,7 @@ from prefect.settings import (
     PREFECT_UI_URL,
     temporary_settings,
 )
-from prefect.states import State
+from prefect.states import Completed, State
 from prefect.task_worker import read_parameters
 from prefect.tasks import Task, task, task_input_hash
 from prefect.testing.utilities import exceptions_equal
@@ -72,10 +74,14 @@ from prefect.transactions import (
     get_transaction,
     transaction,
 )
-from prefect.utilities.annotations import allow_failure, unmapped
+from prefect.utilities.annotations import allow_failure, opaque, unmapped
 from prefect.utilities.asyncutils import run_coro_as_sync
 from prefect.utilities.collections import quote
-from prefect.utilities.engine import get_state_for_result
+from prefect.utilities.engine import (
+    RunType,
+    get_state_for_result,
+    link_state_to_task_run_result,
+)
 
 
 def comparable_inputs(d: dict[str, Any]) -> dict[str, Any]:
@@ -159,6 +165,62 @@ class TestTaskKey:
 
         tt = task(funky)
         assert tt.task_key.startswith("Funky-")
+
+
+class TestTaskSourceCode:
+    def test_source_code_captured_for_function(self):
+        @task
+        def my_task():
+            return 42
+
+        assert my_task.source_code is not None
+        assert "def my_task" in my_task.source_code
+        assert "return 42" in my_task.source_code
+
+    def test_source_code_is_none_for_callable_object(self):
+        class MyCallable:
+            def __call__(self):
+                return 42
+
+        callable_obj = MyCallable()
+        my_task = Task(fn=callable_obj)
+
+        # Callable objects don't have source code accessible via inspect.getsource
+        assert my_task.source_code is None
+
+    def test_source_code_survives_cloudpickle(self):
+        import cloudpickle
+
+        @task
+        def my_task():
+            return "hello"
+
+        # Verify source code is captured
+        original_source = my_task.source_code
+        assert original_source is not None
+        assert "def my_task" in original_source
+
+        # Serialize and deserialize the task
+        pickled = cloudpickle.dumps(my_task)
+        restored_task = cloudpickle.loads(pickled)
+
+        # Source code should survive serialization
+        assert restored_task.source_code == original_source
+
+    def test_source_code_different_for_different_tasks(self):
+        @task
+        def task_a():
+            return "a"
+
+        @task
+        def task_b():
+            return "b"
+
+        assert task_a.source_code is not None
+        assert task_b.source_code is not None
+        assert task_a.source_code != task_b.source_code
+        assert "task_a" in task_a.source_code
+        assert "task_b" in task_b.source_code
 
 
 class TestTaskRunName:
@@ -879,6 +941,25 @@ class TestTaskSubmit:
         assert result[1:] == [1, 2]
         assert "Fail task!" in str(result)
 
+    def test_opaque_resolves_future_without_recursive_traversal(self):
+        @task
+        def produce_result_with_nested_state():
+            return {"data": "value", "nested_state": Completed(data="inner")}
+
+        @task
+        def consume(data):
+            return data
+
+        @flow
+        def test_flow():
+            f = produce_result_with_nested_state.submit()
+            b = consume.submit(opaque(f))
+            return b.result()
+
+        result = test_flow()
+        assert result["data"] == "value"
+        assert isinstance(result["nested_state"], State)
+
     async def test_allow_failure_chained_mapped_tasks(
         self,
     ):
@@ -1384,6 +1465,19 @@ class TestResultPersistence:
         assert my_task.persist_result is persist_result
         assert new_task.persist_result is persist_result
 
+    def test_default_cache_policy_does_not_set_persist_result_with_options(self):
+        @task
+        def base():
+            pass
+
+        assert base.cache_policy == DEFAULT
+        assert base.persist_result is None
+
+        new_task = base.with_options(name="something")
+
+        assert new_task.cache_policy == DEFAULT
+        assert new_task.persist_result is None
+
     @pytest.mark.parametrize(
         "cache_policy",
         [policy for policy in CachePolicy.__subclasses__() if policy != NO_CACHE],
@@ -1460,6 +1554,75 @@ class TestResultPersistence:
 
         assert my_task.persist_result is True
         assert new_task.persist_result is True
+
+    def test_result_storage_accepts_path_object(self, tmpdir):
+        from pathlib import Path
+
+        storage_path = Path(tmpdir) / "results"
+
+        @task(result_storage=storage_path)
+        def my_task():
+            return 42
+
+        assert my_task.result_storage == storage_path
+        assert my_task.persist_result is True
+
+    def test_result_storage_with_path_execution(self, tmpdir):
+        from pathlib import Path
+
+        storage_path = Path(tmpdir) / "results"
+
+        @task(result_storage=storage_path, persist_result=True)
+        def my_task(x: int):
+            return x * 2
+
+        @flow
+        def test_flow():
+            return my_task(5)
+
+        result = test_flow()
+        assert result == 10
+
+    def test_result_storage_path_with_with_options(self, tmpdir):
+        from pathlib import Path
+
+        path1 = Path(tmpdir) / "path1"
+        path2 = Path(tmpdir) / "path2"
+
+        @task(result_storage=path1)
+        def base():
+            pass
+
+        new_task = base.with_options(result_storage=path2)
+
+        assert base.result_storage == path1
+        assert new_task.result_storage == path2
+        assert base.persist_result is True
+        assert new_task.persist_result is True
+
+    def test_result_storage_path_relative(self):
+        from pathlib import Path
+
+        @task(result_storage=Path("./relative/path"))
+        def my_task():
+            return "test"
+
+        assert my_task.result_storage == Path("./relative/path")
+        assert my_task.persist_result is True
+
+    def test_result_storage_unsaved_block_still_rejected(self, tmpdir):
+        import pytest
+
+        block = LocalFileSystem(basepath=str(tmpdir))
+
+        with pytest.raises(
+            TypeError,
+            match="Result storage configuration must be persisted server-side",
+        ):
+
+            @task(result_storage=block)
+            def my_task():
+                pass
 
     def test_logs_warning_on_serialization_error(self, caplog):
         @task(result_serializer="json")
@@ -3244,6 +3407,210 @@ class TestTaskInputs:
         )
 
 
+class TestRunResultsIdentityTracking:
+    """Regression tests for false task dependencies caused by CPython
+    recycling a freed `id()` (see issue #20558).
+
+    `link_state_to_result` keys `flow_run_context.run_results` by
+    `id(obj)`. When the original result object is GC'd and a new,
+    unrelated object is later allocated at the same memory address, a
+    naive `run_results.get(id(v))` lookup returns the *previous* task's
+    state and records a phantom parent edge in `task_inputs`. The fix
+    is identity verification at lookup time via a weak reference back
+    to the original object — a stale entry whose `weakref.ref()` no
+    longer resolves to the looked-up object is rejected.
+
+    These tests pin the contract:
+
+      1. A stale id() must not resolve to a new, unrelated object.
+      2. Equal-but-distinct objects (e.g. two `MyClass(value=5)`
+         instances that compare equal) must NOT infer lineage just
+         because they compare equal — identity tracking is *identity*
+         tracking, not value tracking.
+      3. Existing class-instance result tracking still works.
+      4. The legacy `id()`-only path for non-weakref-able types
+         (`dict`, `list`, `str`, etc.) is preserved as-is.
+    """
+
+    def test_stale_weakref_id_does_not_resolve_to_new_object(self):
+        """The core bug: a stale entry whose weakref points at a dead
+        object must not resolve to a new, unrelated object that happens
+        to share the recycled `id()`.
+
+        We simulate the recycled-address situation deterministically by
+        installing a stale entry into `run_results` at exactly the
+        `id()` of a fresh object — which is what would naturally happen
+        if CPython's allocator had reused the freed slot. The
+        lookup-time identity check must reject the hit.
+        """
+
+        class Original:
+            def __init__(self, val: int) -> None:
+                self.val = val
+
+        class Unrelated:
+            def __init__(self, val: int) -> None:
+                self.val = val
+
+        @flow
+        def harness() -> None:
+            ctx = FlowRunContext.get()
+            assert ctx is not None
+
+            # Build a dead weakref the way `link_state_to_result` would:
+            # an `Original` was linked, then GC'd. We do this in an
+            # inner scope so the original goes out of scope cleanly.
+            def _make_dead_weakref():
+                obj = Original(val=1)
+                ref = weakref.ref(obj)
+                return ref  # `obj` goes out of scope here
+
+            dead_ref = _make_dead_weakref()
+            gc.collect()
+            assert dead_ref() is None, "test setup: original should be GC'd"
+
+            # The "previous task" whose state we'd falsely inherit on
+            # a stale hit.
+            previous_task_id = uuid4()
+            stale_state = Completed(
+                state_details={"task_run_id": previous_task_id}  # type: ignore[arg-type]
+            )
+
+            # Allocate a brand-new, unrelated object and install the
+            # stale entry at *its* id. This is structurally identical
+            # to the natural-allocator-recycle path, but deterministic.
+            new_obj = Unrelated(val=999)
+            ctx.run_results[id(new_obj)] = (
+                stale_state,
+                RunType.TASK_RUN,
+                dead_ref,
+            )
+
+            # Public API must reject the stale hit.
+            res = get_state_for_result(new_obj)
+            assert res is None, (
+                f"stale id resolved to a new, unrelated object: "
+                f"got {res}, expected None"
+            )
+
+            # And the stale entry should have been evicted on detection.
+            assert id(new_obj) not in ctx.run_results, (
+                "stale entry should be evicted on lookup miss"
+            )
+
+        harness()
+
+    def test_equal_but_distinct_objects_do_not_infer_lineage(self):
+        """Identity tracking must not be confused with value tracking.
+        Two different objects that compare equal but were created in
+        different contexts must NOT be reported as related."""
+
+        class Bag:
+            def __init__(self, val: int) -> None:
+                self.val = val
+
+            def __eq__(self, other: object) -> bool:
+                return isinstance(other, Bag) and self.val == other.val
+
+            def __hash__(self) -> int:
+                return hash(self.val)
+
+        @flow
+        def harness() -> None:
+            ctx = FlowRunContext.get()
+            assert ctx is not None
+
+            # Register one Bag(5).
+            state = Completed(
+                state_details={"task_run_id": uuid4()}  # type: ignore[arg-type]
+            )
+            registered = Bag(val=5)
+            link_state_to_task_run_result(state, registered)
+
+            # A *different* Bag(5) — equal by value, distinct by
+            # identity — must not lookup-hit.
+            other = Bag(val=5)
+            assert other == registered
+            assert other is not registered
+            assert get_state_for_result(other) is None, (
+                "value-equal but identity-distinct object should NOT "
+                "be reported as having an upstream dependency"
+            )
+
+            # The original still resolves correctly.
+            assert get_state_for_result(registered) is not None
+
+        harness()
+
+    def test_existing_class_instance_tracking_still_works(self):
+        """When a task returns a class instance and a downstream task
+        receives the same instance, the downstream task records the
+        upstream as a parent. This contract (originally from PR #15418)
+        must keep working with the identity-verification fix in place.
+        """
+
+        class Payload:
+            def __init__(self, val: int) -> None:
+                self.val = val
+
+        @flow
+        def harness() -> None:
+            ctx = FlowRunContext.get()
+            assert ctx is not None
+
+            upstream_task_id = uuid4()
+            state = Completed(
+                state_details={"task_run_id": upstream_task_id}  # type: ignore[arg-type]
+            )
+            payload = Payload(val=42)
+            link_state_to_task_run_result(state, payload)
+
+            # Same instance flowing into a downstream task — must hit.
+            res = get_state_for_result(payload)
+            assert res is not None
+            recovered_state, _ = res
+            assert recovered_state.state_details.task_run_id == upstream_task_id
+
+        harness()
+
+    def test_legacy_id_path_preserved_for_non_weakrefable_types(self):
+        """Plain `dict`, `list`, `str`, `int`, `tuple` etc. don't
+        support `__weakref__`. The fix isolates the bug to those types
+        — implicit-tracking continues to work for them via the legacy
+        `id()`-only path. This is the existing behavior we deliberately
+        do NOT change in this PR.
+        """
+
+        @flow
+        def harness() -> None:
+            ctx = FlowRunContext.get()
+            assert ctx is not None
+
+            upstream_id = uuid4()
+            state = Completed(
+                state_details={"task_run_id": upstream_id}  # type: ignore[arg-type]
+            )
+
+            # Link an instance of each non-weakref-able container type
+            # the docs example uses, then verify each one round-trips.
+            # The legacy id() path means lookup with the *same* object
+            # still hits — only the cleanup-on-GC contract is missing
+            # for these types.
+            for payload in (
+                {"k": "v"},
+                ["a", "b"],
+                ("c",),
+                "a-string",
+            ):
+                link_state_to_task_run_result(state, payload)
+                res = get_state_for_result(payload)
+                assert res is not None, f"{type(payload).__name__} did not round-trip"
+                recovered_state, _ = res
+                assert recovered_state.state_details.task_run_id == upstream_id
+
+        harness()
+
+
 class TestSubflowWaitForTasks:
     async def test_downstream_does_not_run_if_upstream_fails(self):
         @task
@@ -3497,6 +3864,32 @@ class TestTaskWaitFor:
         task_state = await flow_state.result(raise_on_failure=False)
         assert await task_state.result() == 2
 
+    def test_allow_failure_with_mapped_tasks_in_wait_for(self):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/8124"""
+
+        @task
+        def add_one(x):
+            if x == 2:
+                raise ValueError("Something is not right")
+            return x + 1
+
+        @task
+        def add_two(x):
+            return x + 2
+
+        @task
+        def cleanup_task():
+            return "cleanup done"
+
+        @flow
+        def test_flow():
+            b = add_one.map([1, 2, 3])
+            c = add_two.map(b)
+            result = cleanup_task.submit(wait_for=[allow_failure(c)])
+            return result.result()
+
+        assert test_flow() == "cleanup done"
+
 
 async def _wait_for_logs(
     prefect_client: PrefectClient, flow_run_id: Optional[UUID] = None
@@ -3526,11 +3919,12 @@ class TestTaskRunLogs:
         @flow
         def my_flow():
             my_task()
+            return FlowRunContext.get().flow_run.id
 
-        my_flow()
+        flow_run_id = my_flow()
 
         # Logs don't always show up immediately with the new engine
-        logs = await _wait_for_logs(prefect_client)
+        logs = await _wait_for_logs(prefect_client, flow_run_id=flow_run_id)
         assert "Hello world!" in {log.message for log in logs}
 
     async def test_tracebacks_are_logged(self, prefect_client):
@@ -3545,10 +3939,11 @@ class TestTaskRunLogs:
         @flow
         def my_flow():
             my_task()
+            return FlowRunContext.get().flow_run.id
 
-        my_flow()
+        flow_run_id = my_flow()
 
-        logs = await _wait_for_logs(prefect_client)
+        logs = await _wait_for_logs(prefect_client, flow_run_id=flow_run_id)
         error_log = [log.message for log in logs if log.level == 40].pop()
         assert "NameError" in error_log
         assert "x + y" in error_log
@@ -3562,10 +3957,11 @@ class TestTaskRunLogs:
         @flow
         def my_flow():
             my_task()
+            return FlowRunContext.get().flow_run.id
 
-        my_flow()
+        flow_run_id = my_flow()
 
-        logs = await _wait_for_logs(prefect_client)
+        logs = await _wait_for_logs(prefect_client, flow_run_id=flow_run_id)
         assert "Hello world!" not in {log.message for log in logs}
 
     async def test_logs_are_given_correct_ids(self, prefect_client):
@@ -4276,6 +4672,7 @@ class TestTaskMap:
         mapped_args = [1, 2, 3]
 
         futures = test_task.map(x=mapped_args, wait_for=[mock_future], deferred=True)
+        assert isinstance(futures, PrefectFutureList)
         assert all(isinstance(future, PrefectDistributedFuture) for future in futures)
         for future, parameter_value in zip(futures, mapped_args):
             assert await get_background_task_run_parameters(
@@ -4302,6 +4699,7 @@ class TestTaskMap:
             futures = test_task.map(
                 x=mapped_args, wait_for=[mock_future], deferred=True
             )
+            assert isinstance(futures, PrefectFutureList)
             for future, parameter_value in zip(futures, mapped_args):
                 saved_data = await get_background_task_run_parameters(
                     test_task, future.state.state_details.task_parameters_id

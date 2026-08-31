@@ -48,6 +48,7 @@ from typing_extensions import (
     TypeVar,
 )
 
+from prefect.settings import PREFECT_API_DATABASE_CONNECTION_URL
 from prefect.types._datetime import DateTime
 
 P = ParamSpec("P")
@@ -724,6 +725,20 @@ def sqlite_greatest_as_max(
     return compiler.process(sa.func.max(*element.clauses), **kwargs)
 
 
+class least(functions.ReturnTypeFromArgs[T]):
+    inherit_cache: bool = True
+
+
+@compiles(least, "sqlite")
+def sqlite_least_as_min(
+    element: least[Any], compiler: SQLCompiler, **kwargs: Any
+) -> str:
+    # SQLite doesn't have LEAST(), use MIN() instead.
+    # Note: Like MAX(), SQLite MIN() returns NULL if _any_ clause is NULL,
+    # whereas PostgreSQL LEAST() only returns NULL if _all_ clauses are NULL.
+    return compiler.process(sa.func.min(*element.clauses), **kwargs)
+
+
 def get_dialect(obj: Union[str, Session, sa.Engine]) -> type[sa.Dialect]:
     """
     Get the dialect of a session, engine, or connection url.
@@ -753,3 +768,16 @@ def get_dialect(obj: Union[str, Session, sa.Engine]) -> type[sa.Dialect]:
         url = sa.engine.url.make_url(obj)
 
     return url.get_dialect()
+
+
+def get_max_query_parameters() -> int:
+    """The number of bind parameters a single statement may carry.
+
+    Both drivers reject a statement over the limit, so any query built from a
+    variable number of rows must batch itself under it.
+    """
+    dialect = get_dialect(PREFECT_API_DATABASE_CONNECTION_URL.value())
+    if dialect.name == "postgresql":
+        return 32_767
+    else:
+        return 999

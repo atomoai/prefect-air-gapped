@@ -1,5 +1,6 @@
 "use client";
 
+import { addYears, endOfYear, startOfYear } from "date-fns";
 import {
 	ChevronDownIcon,
 	ChevronLeftIcon,
@@ -14,23 +15,38 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 import { cn } from "@/utils";
 
+const DEFAULT_START_MONTH = startOfYear(addYears(new Date(), -100));
+const DEFAULT_END_MONTH = endOfYear(addYears(new Date(), 100));
+
 function Calendar({
 	className,
 	classNames,
 	showOutsideDays = true,
-	captionLayout = "label",
+	fixedWeeks = true,
+	captionLayout = "dropdown",
+	navLayout = "around",
 	buttonVariant = "ghost",
+	startMonth,
+	endMonth,
 	formatters,
 	components,
 	...props
 }: React.ComponentProps<typeof DayPicker> & {
 	buttonVariant?: React.ComponentProps<typeof Button>["variant"];
 }) {
+	const isDropdown = captionLayout?.startsWith("dropdown");
+	const effectiveStartMonth = isDropdown
+		? (startMonth ?? DEFAULT_START_MONTH)
+		: startMonth;
+	const effectiveEndMonth = isDropdown
+		? (endMonth ?? DEFAULT_END_MONTH)
+		: endMonth;
 	const defaultClassNames = getDefaultClassNames();
 
 	return (
 		<DayPicker
 			showOutsideDays={showOutsideDays}
+			fixedWeeks={fixedWeeks}
 			className={cn(
 				"bg-background group/calendar p-3 [--cell-size:--spacing(8)] [[data-slot=card-content]_&]:bg-transparent [[data-slot=popover-content]_&]:bg-transparent",
 				String.raw`rtl:**:[.rdp-button\_next>svg]:rotate-180`,
@@ -38,6 +54,9 @@ function Calendar({
 				className,
 			)}
 			captionLayout={captionLayout}
+			navLayout={navLayout}
+			startMonth={effectiveStartMonth}
+			endMonth={effectiveEndMonth}
 			formatters={{
 				formatMonthDropdown: (date) =>
 					date.toLocaleString("default", { month: "short" }),
@@ -49,19 +68,22 @@ function Calendar({
 					"flex gap-4 flex-col md:flex-row relative",
 					defaultClassNames.months,
 				),
-				month: cn("flex flex-col w-full gap-4", defaultClassNames.month),
+				month: cn(
+					"relative flex flex-col w-full gap-4",
+					defaultClassNames.month,
+				),
 				nav: cn(
 					"flex items-center gap-1 w-full absolute top-0 inset-x-0 justify-between",
 					defaultClassNames.nav,
 				),
 				button_previous: cn(
 					buttonVariants({ variant: buttonVariant }),
-					"size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
+					"absolute top-0 left-0 size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
 					defaultClassNames.button_previous,
 				),
 				button_next: cn(
 					buttonVariants({ variant: buttonVariant }),
-					"size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
+					"absolute top-0 right-0 size-(--cell-size) aria-disabled:opacity-50 p-0 select-none",
 					defaultClassNames.button_next,
 				),
 				month_caption: cn(
@@ -87,7 +109,7 @@ function Calendar({
 						: "rounded-md pl-2 pr-1 flex items-center gap-1 text-sm h-8 [&>svg]:text-muted-foreground [&>svg]:size-3.5",
 					defaultClassNames.caption_label,
 				),
-				table: "w-full border-collapse",
+				month_grid: cn("w-full border-collapse", defaultClassNames.month_grid),
 				weekdays: cn("flex", defaultClassNames.weekdays),
 				weekday: cn(
 					"text-muted-foreground rounded-md flex-1 font-normal text-[0.8rem] select-none",

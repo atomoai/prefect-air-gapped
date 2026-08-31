@@ -8,6 +8,8 @@ from prefect.runtime import task_run
 from prefect.settings import PREFECT_API_URL, PREFECT_UI_URL
 from prefect.tasks import Task
 
+pytestmark = pytest.mark.clear_db
+
 
 class TestAttributeAccessPatterns:
     async def test_access_unknown_attribute_fails(self):
@@ -170,7 +172,7 @@ class TestURL:
         assert getattr(task_run, url_type) is None
 
     @pytest.mark.parametrize(
-        "url_type,",
+        "url_type",
         ["api_url", "ui_url"],
     )
     async def test_url_returns_correct_url_when_id_present(

@@ -1,4 +1,3 @@
-import humanizeDuration from "humanize-duration";
 import { useMemo } from "react";
 import type { FlowRunCardData } from "@/components/flow-runs/flow-run-card";
 import { Icon } from "@/components/ui/icons";
@@ -9,6 +8,7 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { formatDate } from "@/utils/date";
+import { secondsToApproximateString } from "@/utils/seconds";
 
 type FlowRunStartTimeProps = { flowRun: FlowRunCardData };
 export const FlowRunStartTime = ({ flowRun }: FlowRunStartTimeProps) => {
@@ -22,7 +22,7 @@ export const FlowRunStartTime = ({ flowRun }: FlowRunStartTimeProps) => {
 			text = `${formatDate(start_time, "dateTimeNumeric")} ${getDelta(estimated_start_time_delta)}`;
 			tooltipText = new Date(start_time).toString();
 		} else if (expected_start_time) {
-			text = `Scheduled for ${formatDate(expected_start_time, "dateTimeNumeric")} ${getDelta(estimated_start_time_delta)}`;
+			text = `${formatDate(expected_start_time, "dateTimeNumeric")} ${getDelta(estimated_start_time_delta)}`;
 			tooltipText = new Date(expected_start_time).toString();
 		}
 		return { text, tooltipText };
@@ -47,5 +47,5 @@ const getDelta = (estimated_start_time_delta: null | number) => {
 	if (!estimated_start_time_delta || estimated_start_time_delta <= 60) {
 		return "";
 	}
-	return `(${humanizeDuration(estimated_start_time_delta, { maxDecimalPoints: 0 })} late)`;
+	return `(${secondsToApproximateString(Math.round(estimated_start_time_delta))} late)`;
 };

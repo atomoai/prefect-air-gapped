@@ -50,7 +50,6 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import shlex
 from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
@@ -69,12 +68,20 @@ import anyio.abc
 import yaml
 from pydantic import BaseModel, Field, model_validator
 from slugify import slugify
-from tenacity import retry, stop_after_attempt, wait_fixed, wait_random
+from tenacity import (
+    Retrying,
+    stop_after_attempt,
+    wait_exponential_jitter,
+    wait_fixed,
+    wait_random,
+)
 from typing_extensions import Literal, Self
 
 from prefect.client.schemas.objects import FlowRun
+from prefect.exceptions import InfrastructureNotFound
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.dockerutils import get_prefect_image_name
+from prefect.utilities.processutils import command_from_string
 from prefect.utilities.templating import find_placeholders
 from prefect.workers.base import (
     BaseJobConfiguration,
@@ -84,8 +91,11 @@ from prefect.workers.base import (
 )
 from prefect_aws.credentials import AwsCredentials
 from prefect_aws.observers.ecs import start_observer, stop_observer
+from prefect_aws.settings import EcsWorkerSettings
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from mypy_boto3_ecs import ECSClient
     from mypy_boto3_ecs.type_defs import TaskDefinitionTypeDef
 
@@ -136,11 +146,6 @@ taskDefinition: "{{ task_definition_arn }}"
 capacityProviderStrategy: "{{ capacity_provider_strategy }}"
 """
 
-# Create task run retry settings
-MAX_CREATE_TASK_RUN_ATTEMPTS = 3
-CREATE_TASK_RUN_MIN_DELAY_SECONDS = 1
-CREATE_TASK_RUN_MIN_DELAY_JITTER_SECONDS = 0
-CREATE_TASK_RUN_MAX_DELAY_JITTER_SECONDS = 3
 
 _TASK_DEFINITION_CACHE: Dict[UUID, str] = {}
 _TAG_REGEX = r"[^a-zA-Z0-9_./=+:@-]"
@@ -174,9 +179,13 @@ def _drop_empty_keys_from_dict(taskdef: dict):
     Recursively drop keys with 'empty' values from a task definition dict.
 
     Mutates the task definition in place. Only supports recursion into dicts and lists.
+
+    Removes keys with truly empty values (None, empty strings, empty lists, empty dicts)
+    but preserves boolean False values which are meaningful.
     """
     for key, value in tuple(taskdef.items()):
-        if not value:
+        # Only remove truly empty values, not boolean False
+        if not value and value is not False:
             taskdef.pop(key)
         if isinstance(value, dict):
             _drop_empty_keys_from_dict(value)
@@ -353,8 +362,11 @@ class ECSJobConfiguration(BaseJobConfiguration):
         flow: "APIFlow | None" = None,
         work_pool: "WorkPool | None" = None,
         worker_name: str | None = None,
+        worker_id: "UUID | None" = None,
     ) -> None:
-        super().prepare_for_flow_run(flow_run, deployment, flow, work_pool, worker_name)
+        super().prepare_for_flow_run(
+            flow_run, deployment, flow, work_pool, worker_name, worker_id=worker_id
+        )
         if self.prefect_api_key_secret_arn:
             # Remove the PREFECT_API_KEY from the environment variables because it will be provided via a secret
             del self.env["PREFECT_API_KEY"]
@@ -393,6 +405,22 @@ class ECSJobConfiguration(BaseJobConfiguration):
             # definition arn. In that case, we'll perform similar logic later to find
             # the name to treat as the "orchestration" container.
 
+        return self
+
+    @model_validator(mode="after")
+    def at_least_one_container_is_essential(self) -> Self:
+        """
+        Ensures that at least one container will be marked as essential
+        in the task definition.
+        """
+        container_definitions = self.task_definition.get("containerDefinitions", [])
+        if container_definitions and all(
+            container.get("essential") is False for container in container_definitions
+        ):
+            raise ValueError(
+                "At least one container in the task definition must be marked as "
+                "essential."
+            )
         return self
 
     @model_validator(mode="after")
@@ -825,12 +853,24 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
         )
 
         try:
-            task = self._create_task_run(ecs_client, task_run_request)
+            settings = EcsWorkerSettings()
+            retrying = Retrying(
+                stop=stop_after_attempt(settings.create_task_run_max_attempts),
+                wait=wait_fixed(settings.create_task_run_min_delay_seconds)
+                + wait_random(
+                    settings.create_task_run_min_delay_jitter_seconds,
+                    settings.create_task_run_max_delay_jitter_seconds,
+                ),
+                reraise=True,
+            )
+            task = retrying(self._create_task_run, ecs_client, task_run_request)
             task_arn = task["taskArn"]
             cluster_arn = task["clusterArn"]
         except Exception as exc:
             self._report_task_run_creation_failure(configuration, task_run_request, exc)
             raise
+
+        logger.info(f"Created ECS task {task_arn!r}")
 
         return task_arn, cluster_arn
 
@@ -842,14 +882,17 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
         """
         # AWS generates exception types at runtime so they must be captured a bit
         # differently than normal.
-        if "ClusterNotFoundException" in str(exc):
+        exc_str = str(exc)
+        exc_str_lower = exc_str.lower()
+
+        if "ClusterNotFoundException" in exc_str:
             cluster = task_run.get("cluster", "default")
             raise RuntimeError(
                 f"Failed to run ECS task, cluster {cluster!r} not found. "
                 "Confirm that the cluster is configured in your region."
             ) from exc
         elif (
-            "No Container Instances" in str(exc) and task_run.get("launchType") == "EC2"
+            "No Container Instances" in exc_str and task_run.get("launchType") == "EC2"
         ):
             cluster = task_run.get("cluster", "default")
             raise RuntimeError(
@@ -858,8 +901,8 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
                 "have EC2 container instances available."
             ) from exc
         elif (
-            "failed to validate logger args" in str(exc)
-            and "AccessDeniedException" in str(exc)
+            "failed to validate logger args" in exc_str
+            and "AccessDeniedException" in exc_str
             and configuration.configure_cloudwatch_logs
         ):
             raise RuntimeError(
@@ -868,6 +911,29 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
                 f" {configuration.execution_role!r} has permissions"
                 " logs:CreateLogStream, logs:CreateLogGroup, and logs:PutLogEvents."
             )
+        elif "TaskDefinition is inactive" in exc_str:
+            raise RuntimeError(
+                "Failed to run ECS task, the task definition is inactive. "
+                "Re-register the task definition or remove the "
+                "`task_definition_arn` from your work pool configuration to "
+                "allow Prefect to register a new task definition automatically."
+            ) from exc
+        elif "no capacity" in exc_str_lower or "capacity provider" in exc_str_lower:
+            raise RuntimeError(
+                "Failed to run ECS task due to a capacity provider error. "
+                "Verify that your Fargate or EC2 capacity providers are "
+                "correctly configured for the cluster and that the requested "
+                "capacity is available."
+            ) from exc
+        elif "InvalidParameterException" in exc_str and any(
+            keyword in exc_str_lower
+            for keyword in ("subnet", "security group", "network")
+        ):
+            raise RuntimeError(
+                "Failed to run ECS task due to a network configuration error. "
+                "Verify the subnets and security groups in your work pool's "
+                "network configuration are valid and belong to the expected VPC."
+            ) from exc
         else:
             raise
 
@@ -933,8 +999,23 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
                 cached_task_definition_arn = None
 
         if not cached_task_definition_arn:
-            task_definition_arn = self._register_task_definition(
-                logger, ecs_client, task_definition
+            settings = EcsWorkerSettings()
+            retrying = Retrying(
+                stop=stop_after_attempt(settings.register_task_definition_max_attempts),
+                wait=wait_exponential_jitter(
+                    initial=settings.register_task_definition_initial_delay_seconds,
+                    max=settings.register_task_definition_max_delay_seconds,
+                ),
+                reraise=True,
+                before_sleep=lambda rs: logger.warning(
+                    "Retrying task definition registration in %.2fs (attempt %s/%s)",
+                    rs.next_action.sleep,
+                    rs.attempt_number,
+                    settings.register_task_definition_max_attempts,
+                ),
+            )
+            task_definition_arn = retrying(
+                self._register_task_definition, logger, ecs_client, task_definition
             )
             new_task_definition_registered = True
         else:
@@ -963,15 +1044,23 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
         capacity_provider_strategy = configuration.task_run_request.get(
             "capacityProviderStrategy"
         )
+        requires_ec2 = "EC2" in task_definition.get("requiresCompatibilities", [])
 
         # Users may submit a job with a custom capacity provider strategy which requires
-        # launch type to be empty.
+        # launch type to be empty. EC2 task definitions may also omit launch type to use
+        # the cluster's default capacity provider.
         if not launch_type and not capacity_provider_strategy:
-            launch_type = ECS_DEFAULT_LAUNCH_TYPE
+            if not requires_ec2:
+                launch_type = ECS_DEFAULT_LAUNCH_TYPE
 
         # Fargate spot requires a launch type and a capacity provider strategy
         # otherwise we're valid with a capacity provider strategy alone
         if capacity_provider_strategy and launch_type != "FARGATE_SPOT":
+            return
+
+        # EC2 task definitions with null launch_type are valid - they use the cluster's
+        # default capacity provider. See https://github.com/PrefectHQ/prefect/issues/19627
+        if requires_ec2 and not launch_type:
             return
 
         # Default launch type in compatibilities to maintain functionality with
@@ -1171,32 +1260,34 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
         _drop_empty_keys_from_dict(task_definition)
 
         # Handle secrets for both API key and auth string
-        secrets = []
+        prefect_secrets: dict[str, str] = {}
         if configuration.prefect_api_key_secret_arn:
-            secrets.append(
-                {
-                    "name": "PREFECT_API_KEY",
-                    "valueFrom": configuration.prefect_api_key_secret_arn,
-                }
+            prefect_secrets["PREFECT_API_KEY"] = (
+                configuration.prefect_api_key_secret_arn
             )
-            # Remove the PREFECT_API_KEY from the environment variables
-            for item in tuple(container.get("environment", [])):
-                if item["name"] == "PREFECT_API_KEY":
-                    container["environment"].remove(item)  # type: ignore
-
         if configuration.prefect_api_auth_string_secret_arn:
-            secrets.append(
-                {
-                    "name": "PREFECT_API_AUTH_STRING",
-                    "valueFrom": configuration.prefect_api_auth_string_secret_arn,
-                }
+            prefect_secrets["PREFECT_API_AUTH_STRING"] = (
+                configuration.prefect_api_auth_string_secret_arn
             )
-            # Remove the PREFECT_API_AUTH_STRING from the environment variables
+
+        if prefect_secrets:
+            # Remove the corresponding environment variables because the values will
+            # be provided via secrets instead
             for item in tuple(container.get("environment", [])):
-                if item["name"] == "PREFECT_API_AUTH_STRING":
+                if item["name"] in prefect_secrets:
                     container["environment"].remove(item)  # type: ignore
 
-        if secrets:
+            # Merge into any secrets already defined on the container rather than
+            # replacing them. A secret configured here takes precedence over one of
+            # the same name in the task definition.
+            secrets = list(container.get("secrets") or [])
+            for secret in secrets:
+                if secret.get("name") in prefect_secrets:
+                    secret["valueFrom"] = prefect_secrets.pop(secret["name"])
+            secrets.extend(
+                {"name": name, "valueFrom": value_from}
+                for name, value_from in prefect_secrets.items()
+            )
             container["secrets"] = secrets
 
         return task_definition
@@ -1309,6 +1400,31 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
             f"Task definition ARN mismatch: {task_run_request['taskDefinition']!r} "
             f"!= {task_definition_arn!r}"
         )
+
+        # Explicitly add cluster from configuration if set and not already in task_run_request
+        # or if the value in task_run_request is empty/None
+        # This ensures cluster is included even when template variables resolve to empty/None
+        if configuration.cluster:
+            existing_cluster = task_run_request.get("cluster")
+            if not existing_cluster:
+                task_run_request["cluster"] = configuration.cluster
+
+        # Explicitly add launchType if missing or empty in task_run_request
+        # This ensures launchType is included even when template variables resolve to empty/None
+        # AWS expects camelCase "launchType" not snake_case "launch_type"
+        # Default to FARGATE if not specified, which matches the default launch_type variable
+        # Note: launchType may be removed later if capacityProviderStrategy is set
+        # Exception: EC2 task definitions may omit launchType to use cluster capacity providers
+        existing_launch_type = task_run_request.get("launchType")
+        requires_ec2 = "EC2" in task_definition.get("requiresCompatibilities", [])
+        if not existing_launch_type and not requires_ec2:
+            # Default to FARGATE if launchType is missing, matching the default launch_type variable
+            task_run_request["launchType"] = ECS_DEFAULT_LAUNCH_TYPE
+        elif not existing_launch_type and requires_ec2:
+            # EC2 task definitions may omit launchType to use cluster capacity providers
+            # Ensure the key is removed entirely, not just set to None
+            task_run_request.pop("launchType", None)
+
         capacityProviderStrategy = task_run_request.get("capacityProviderStrategy")
 
         if capacityProviderStrategy:
@@ -1378,7 +1494,7 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
 
         for container in container_overrides:
             if isinstance(container.get("command"), str):
-                container["command"] = shlex.split(container["command"])
+                container["command"] = command_from_string(container["command"])
             if isinstance(container.get("environment"), dict):
                 container["environment"] = [
                     {"name": k, "value": v} for k, v in container["environment"].items()
@@ -1462,15 +1578,6 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
 
         return task_run_request
 
-    @retry(
-        stop=stop_after_attempt(MAX_CREATE_TASK_RUN_ATTEMPTS),
-        wait=wait_fixed(CREATE_TASK_RUN_MIN_DELAY_SECONDS)
-        + wait_random(
-            CREATE_TASK_RUN_MIN_DELAY_JITTER_SECONDS,
-            CREATE_TASK_RUN_MAX_DELAY_JITTER_SECONDS,
-        ),
-        reraise=True,
-    )
     def _create_task_run(self, ecs_client: "ECSClient", task_run_request: dict) -> str:
         """
         Create a run of a task definition.
@@ -1509,17 +1616,15 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
         for taskdef in (taskdef_1, taskdef_2):
             # Set defaults that AWS would set after registration
             container_definitions = taskdef.get("containerDefinitions", [])
-            essential = any(
-                container.get("essential") for container in container_definitions
-            )
-            if not essential:
-                container_definitions[0].setdefault("essential", True)
 
             taskdef.setdefault("networkMode", "bridge")
 
             # Normalize ordering of lists that ECS considers unordered
             # ECS stores these in unordered data structures, so order shouldn't matter for comparison
             for container in container_definitions:
+                # If essential is not explicitly set, AWS will default to setting it to True
+                container.setdefault("essential", True)
+
                 # Sort environment variables by name for consistent comparison
                 if "environment" in container:
                     container["environment"] = sorted(
@@ -1576,6 +1681,68 @@ class ECSWorker(BaseWorker[ECSJobConfiguration, ECSVariables, ECSWorkerResult]):
                     logger.debug(f" Retrieved: {taskdef_2[key]}")
 
         return taskdef_1 == taskdef_2
+
+    async def kill_infrastructure(
+        self,
+        infrastructure_pid: str,
+        configuration: ECSJobConfiguration,
+        grace_seconds: int = 30,
+    ) -> None:
+        """
+        Stop an ECS task.
+
+        Args:
+            infrastructure_pid: The infrastructure identifier in format
+                "cluster::task_arn".
+            configuration: The job configuration used to connect to AWS.
+            grace_seconds: Not used for ECS (ECS handles graceful shutdown internally).
+
+        Raises:
+            InfrastructureNotFound: If the task doesn't exist.
+        """
+        cluster, task_arn = parse_identifier(infrastructure_pid)
+
+        await run_sync_in_worker_thread(
+            self._stop_task, cluster, task_arn, configuration
+        )
+
+    def _stop_task(
+        self, cluster: str, task_arn: str, configuration: ECSJobConfiguration
+    ) -> None:
+        """
+        Stop an ECS task.
+
+        Args:
+            cluster: The ECS cluster name or ARN.
+            task_arn: The ARN of the task to stop.
+            configuration: The job configuration used to connect to AWS.
+
+        Raises:
+            InfrastructureNotFound: If the task doesn't exist.
+        """
+        ecs_client: "ECSClient" = configuration.aws_credentials.get_client("ecs")
+
+        try:
+            ecs_client.stop_task(
+                cluster=cluster,
+                task=task_arn,
+                reason="Stopped by Prefect worker",
+            )
+            self._logger.info(f"Stopped ECS task {task_arn!r} in cluster {cluster!r}")
+        except ecs_client.exceptions.InvalidParameterException as exc:
+            # Task not found or already stopped
+            if "task was not found" in str(exc).lower():
+                raise InfrastructureNotFound(
+                    f"ECS task {task_arn!r} not found in cluster {cluster!r}"
+                )
+            raise
+        except Exception as exc:
+            # Handle other AWS exceptions
+            if "InvalidParameterException" in str(type(exc).__name__):
+                raise InfrastructureNotFound(
+                    f"ECS task {task_arn!r} not found in cluster {cluster!r}"
+                )
+            raise
 
     async def __aenter__(self) -> Self:
         await start_observer()

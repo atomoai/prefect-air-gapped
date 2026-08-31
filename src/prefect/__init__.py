@@ -12,21 +12,24 @@ if TYPE_CHECKING:
     from importlib.machinery import ModuleSpec
     from .main import (
         allow_failure,
+        apause_flow_run,
+        aresume_flow_run,
+        aserve,
+        asuspend_flow_run,
         flow,
         Flow,
         get_client,
         get_run_logger,
+        pause_flow_run,
+        resume_flow_run,
+        serve,
         State,
+        suspend_flow_run,
         tags,
         task,
         Task,
         Transaction,
         unmapped,
-        serve,
-        aserve,
-        pause_flow_run,
-        resume_flow_run,
-        suspend_flow_run,
     )
     from prefect.deployments.runner import deploy
 
@@ -63,29 +66,36 @@ __ui_static_subpath__: pathlib.Path = __module_path__ / "server" / "ui_build"
 # The absolute path to the built UI within the Python module
 __ui_static_path__: pathlib.Path = __module_path__ / "server" / "ui"
 
+# The absolute path to the built V2 UI within the Python module, used by
+# `prefect server start` to serve a dynamic build of the V2 UI
+__ui_v2_static_subpath__: pathlib.Path = __module_path__ / "server" / "ui_v2_build"
+
+# The absolute path to the built V2 UI within the Python module
+__ui_v2_static_path__: pathlib.Path = __module_path__ / "server" / "ui-v2"
+
 del _build_info, pathlib
 
 
 def _initialize_plugins() -> None:
     """
-    Initialize the experimental plugin system if enabled.
+    Initialize the plugin system if enabled.
 
     This runs automatically when Prefect is imported and plugins are enabled
-    via experiments.plugins.enabled setting. Errors are logged but don't prevent
+    via the `plugins.enabled` setting. Errors are logged but don't prevent
     Prefect from loading.
     """
     try:
         # Import here to avoid circular imports and defer cost until needed
         from prefect.settings import get_current_settings
 
-        if not get_current_settings().experiments.plugins.enabled:
+        if not get_current_settings().plugins.enabled:
             return
 
         import anyio
 
-        from prefect._experimental.plugins import run_startup_hooks
-        from prefect._experimental.plugins.spec import HookContext
+        from prefect.context import refresh_global_settings_context
         from prefect.logging import get_logger
+        from prefect.plugins import HookContext, run_startup_hooks
         from prefect.settings import get_current_settings
 
         ctx = HookContext(
@@ -96,10 +106,18 @@ def _initialize_plugins() -> None:
 
         # Run plugin hooks synchronously during import
         anyio.run(run_startup_hooks, ctx)
+
+        # Refresh global settings context to pick up any env vars set by plugins
+        refresh_global_settings_context()
     except SystemExit:
         # Re-raise SystemExit from strict mode
         raise
     except Exception as e:
+        from pydantic_settings.exceptions import SettingsError
+
+        if isinstance(e, SettingsError):
+            return
+
         # Log but don't crash on plugin errors
         try:
             from prefect.logging import get_logger
@@ -113,12 +131,31 @@ def _initialize_plugins() -> None:
             print(f"Failed to initialize plugins: {e}", file=sys.stderr)
 
 
-# Initialize plugins on import if enabled
-_initialize_plugins()
+def _initialize_sdk_analytics() -> None:
+    """
+    Initialize SDK analytics for telemetry.
+
+    This runs automatically when Prefect is imported. Errors are silently
+    ignored to ensure analytics never impacts normal Prefect operation.
+    """
+    try:
+        from prefect._internal.analytics import initialize_analytics
+
+        initialize_analytics()
+    except Exception:
+        # Never let analytics initialization impact Prefect
+        pass
+
+
+# Initialize SDK analytics on import
+_initialize_sdk_analytics()
 
 _public_api: dict[str, tuple[Optional[str], str]] = {
     "allow_failure": (__spec__.parent, ".main"),
+    "apause_flow_run": (__spec__.parent, ".main"),
+    "aresume_flow_run": (__spec__.parent, ".main"),
     "aserve": (__spec__.parent, ".main"),
+    "asuspend_flow_run": (__spec__.parent, ".main"),
     "deploy": (__spec__.parent, ".deployments.runner"),
     "flow": (__spec__.parent, ".main"),
     "Flow": (__spec__.parent, ".main"),
@@ -140,7 +177,10 @@ _public_api: dict[str, tuple[Optional[str], str]] = {
 __all__ = [
     "__version__",
     "allow_failure",
+    "apause_flow_run",
+    "aresume_flow_run",
     "aserve",
+    "asuspend_flow_run",
     "deploy",
     "flow",
     "Flow",
@@ -174,3 +214,8 @@ def __getattr__(attr_name: str) -> Any:
         mname, _, attr = (ex.name or "").rpartition(".")
         ctx = {"name": mname, "obj": attr} if sys.version_info >= (3, 10) else {}
         raise AttributeError(f"module {mname} has no attribute {attr}", **ctx) from ex
+
+
+# Initialize plugins on import if enabled
+# Must be after __getattr__ so lazy imports work when plugins import from prefect
+_initialize_plugins()

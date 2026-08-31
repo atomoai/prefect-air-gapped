@@ -17,6 +17,8 @@ from prefect.settings import (
 )
 from prefect.types import SecretDict
 
+pytestmark = pytest.mark.clear_db
+
 default_cloud_run_push_base_job_template = {
     "job_configuration": {
         "command": "{{ command }}",
@@ -377,7 +379,7 @@ async def test_provision_interactive_with_default_names(
     mock_confirm = MagicMock(return_value=True)
 
     monkeypatch.setattr(
-        "prefect.infrastructure.provisioners.cloud_run.prompt_select_from_table",
+        "prefect.cli._prompts.prompt_select_from_table",
         mock_prompt_select_from_table,
     )
     monkeypatch.setattr(
@@ -456,11 +458,9 @@ async def test_provision_interactive_with_custom_names(
     )
     mock_confirm = MagicMock(return_value=True)
 
+    monkeypatch.setattr("prefect.cli._prompts.prompt", mock_prompt)
     monkeypatch.setattr(
-        "prefect.infrastructure.provisioners.cloud_run.prompt", mock_prompt
-    )
-    monkeypatch.setattr(
-        "prefect.infrastructure.provisioners.cloud_run.prompt_select_from_table",
+        "prefect.cli._prompts.prompt_select_from_table",
         mock_prompt_select_from_table,
     )
     monkeypatch.setattr(
@@ -531,7 +531,7 @@ async def test_provision_interactive_reject_provisioning(
     mock_confirm = MagicMock(return_value=False)
 
     monkeypatch.setattr(
-        "prefect.infrastructure.provisioners.cloud_run.prompt_select_from_table",
+        "prefect.cli._prompts.prompt_select_from_table",
         mock_prompt_select_from_table,
     )
     monkeypatch.setattr(

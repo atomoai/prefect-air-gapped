@@ -93,6 +93,9 @@ class OrchestrationClient(BaseClient):
     async def read_flow_run_raw(self, flow_run_id: UUID) -> Response:
         return await self._http_client.get(f"/flow_runs/{flow_run_id}")
 
+    async def delete_flow_run(self, flow_run_id: UUID) -> Response:
+        return await self._http_client.delete(f"/flow_runs/{flow_run_id}")
+
     async def read_task_run_raw(self, task_run_id: UUID) -> Response:
         return await self._http_client.get(f"/task_runs/{task_run_id}")
 
@@ -114,13 +117,13 @@ class OrchestrationClient(BaseClient):
         )
 
     async def set_flow_run_state(
-        self, flow_run_id: UUID, state: StateCreate
+        self, flow_run_id: UUID, state: StateCreate, force: bool = False
     ) -> Response:
         return await self._http_client.post(
             f"/flow_runs/{flow_run_id}/set_state",
             json={
                 "state": state.model_dump(mode="json"),
-                "force": False,
+                "force": force,
             },
         )
 

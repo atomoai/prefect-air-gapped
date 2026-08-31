@@ -451,6 +451,8 @@ async def count_flow_runs(
         flow_run_filter: only count flow runs that match these filters
         task_run_filter: only count flow runs whose task runs match these filters
         deployment_filter: only count flow runs whose deployments match these filters
+        work_pool_filter: only count flow runs whose work pool matches these filters
+        work_queue_filter: only count flow runs whose work queue matches these filters
 
     Returns:
         int: count of flow runs
@@ -458,16 +460,54 @@ async def count_flow_runs(
 
     query = select(sa.func.count(None)).select_from(db.FlowRun)
 
-    query = await _apply_flow_run_filters(
-        db,
-        query,
-        flow_filter=flow_filter,
-        flow_run_filter=flow_run_filter,
-        task_run_filter=task_run_filter,
-        deployment_filter=deployment_filter,
-        work_pool_filter=work_pool_filter,
-        work_queue_filter=work_queue_filter,
-    )
+    # Fast path: JOIN instead of correlated EXISTS for the four FK filter dimensions.
+    # Safe because deployment_id, work_queue_id, and flow_id are single-valued scalar
+    # FK columns on FlowRun — each JOIN adds at most one row per flow_run, so
+    # COUNT(*) is not inflated.  NULL FK rows are excluded by the INNER JOIN, which
+    # matches EXISTS semantics.  task_run_filter is excluded: TaskRun.flow_run_id is
+    # the 1-to-N side, so a TaskRun JOIN would produce multiple rows per flow_run
+    # and corrupt the count.  Any new filter added here must be N:1 to FlowRun.
+    if (
+        deployment_filter or work_pool_filter or work_queue_filter or flow_filter
+    ) and not task_run_filter:
+        if flow_run_filter:
+            query = query.where(flow_run_filter.as_sql_filter())
+
+        if deployment_filter:
+            query = query.join(
+                db.Deployment, db.Deployment.id == db.FlowRun.deployment_id
+            )
+            query = query.where(deployment_filter.as_sql_filter())
+
+        if work_queue_filter or work_pool_filter:
+            # WorkPool is not directly joined to FlowRun; go through WorkQueue
+            # as the bridge: FlowRun → WorkQueue → WorkPool.
+            query = query.join(
+                db.WorkQueue, db.WorkQueue.id == db.FlowRun.work_queue_id
+            )
+            if work_queue_filter:
+                query = query.where(work_queue_filter.as_sql_filter())
+            if work_pool_filter:
+                query = query.join(
+                    db.WorkPool, db.WorkPool.id == db.WorkQueue.work_pool_id
+                )
+                query = query.where(work_pool_filter.as_sql_filter())
+
+        if flow_filter:
+            query = query.join(db.Flow, db.Flow.id == db.FlowRun.flow_id)
+            query = query.where(flow_filter.as_sql_filter())
+
+    else:
+        query = await _apply_flow_run_filters(
+            db,
+            query,
+            flow_filter=flow_filter,
+            flow_run_filter=flow_run_filter,
+            task_run_filter=task_run_filter,
+            deployment_filter=deployment_filter,
+            work_pool_filter=work_pool_filter,
+            work_queue_filter=work_queue_filter,
+        )
 
     result = await session.execute(query)
     return result.scalar_one()
@@ -502,6 +542,48 @@ async def delete_flow_run(
     )
 
     return result.rowcount > 0
+
+
+@db_injector
+async def delete_flow_runs(
+    db: PrefectDBInterface,
+    session: AsyncSession,
+    flow_run_ids: List[UUID],
+) -> List[UUID]:
+    """
+    Delete multiple flow runs by their IDs, handling concurrency limits.
+
+    Args:
+        session: A database session
+        flow_run_ids: a list of flow run ids to delete
+
+    Returns:
+        List[UUID]: the IDs of the flow runs that were deleted
+    """
+    if not flow_run_ids:
+        return []
+
+    # Read all flow runs to handle concurrency cleanup
+    flow_runs = await session.execute(
+        select(db.FlowRun).where(db.FlowRun.id.in_(flow_run_ids))
+    )
+    flow_run_list = flow_runs.scalars().all()
+
+    if not flow_run_list:
+        return []
+
+    # Cleanup concurrency slots for each flow run that has a deployment
+    for flow_run in flow_run_list:
+        if flow_run.deployment_id:
+            await cleanup_flow_run_concurrency_slots(session=session, flow_run=flow_run)
+
+    # Get the IDs of flow runs that exist
+    existing_ids = [fr.id for fr in flow_run_list]
+
+    # Delete all flow runs in one query
+    await session.execute(delete(db.FlowRun).where(db.FlowRun.id.in_(existing_ids)))
+
+    return existing_ids
 
 
 async def set_flow_run_state(

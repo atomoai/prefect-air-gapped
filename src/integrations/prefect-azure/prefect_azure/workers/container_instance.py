@@ -70,6 +70,7 @@ to poll for flow runs.
 """  # noqa
 
 import datetime
+import logging
 import sys
 import time
 from enum import Enum
@@ -93,8 +94,10 @@ from pydantic import Field, SecretStr
 from slugify import slugify
 
 from prefect.client.orchestration import get_client
+from prefect.exceptions import InfrastructureNotFound
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.dockerutils import get_prefect_image_name
+from prefect.utilities.processutils import command_from_string
 from prefect.workers.base import (
     BaseJobConfiguration,
     BaseVariables,
@@ -105,6 +108,8 @@ from prefect_azure.container_instance import ACRManagedIdentity
 from prefect_azure.credentials import AzureContainerInstanceCredentials
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from prefect.client.schemas.objects import Flow, FlowRun, WorkPool
     from prefect.client.schemas.responses import DeploymentResponse
 
@@ -124,6 +129,12 @@ ENV_SECRETS = ["PREFECT_API_KEY", "PREFECT_API_AUTH_STRING"]
 # has gone wrong and we should raise an exception to inform the user they should
 # check their Azure account for orphaned container groups.
 CONTAINER_GROUP_DELETION_TIMEOUT_SECONDS = 30
+
+# Retry settings for transient Azure ARM API errors (e.g. HTTP 503)
+CONTAINER_GROUP_GET_MAX_RETRIES = 3
+CONTAINER_GROUP_GET_BACKOFF_FACTOR = 1.0
+
+logger = logging.getLogger(__name__)
 DockerRegistry = Union[ACRManagedIdentity, DockerRegistryCredentials, None]
 
 
@@ -239,11 +250,14 @@ class AzureContainerJobConfiguration(BaseJobConfiguration):
         flow: Optional["Flow"] = None,
         work_pool: Optional["WorkPool"] = None,
         worker_name: Optional[str] = None,
+        worker_id: Optional["UUID"] = None,
     ):
         """
         Prepares the job configuration for a flow run.
         """
-        super().prepare_for_flow_run(flow_run, deployment, flow, work_pool, worker_name)
+        super().prepare_for_flow_run(
+            flow_run, deployment, flow, work_pool, worker_name, worker_id=worker_id
+        )
 
         # expectations:
         # - the first resource in the template is the container group
@@ -256,7 +270,7 @@ class AzureContainerJobConfiguration(BaseJobConfiguration):
 
         # convert the command from a string to a list, because that's what ACI expects
         if self.command:
-            container["properties"]["command"] = self.command.split(" ")
+            container["properties"]["command"] = command_from_string(self.command)
 
         self._add_image()
 
@@ -845,12 +859,33 @@ class AzureContainerWorker(
         container_group_name: str,
     ) -> ContainerGroup:
         """
-        Gets the container group from Azure.
+        Gets the container group from Azure, retrying on transient server errors.
         """
-        return client.container_groups.get(
-            resource_group_name=resource_group_name,
-            container_group_name=container_group_name,
-        )
+        for attempt in range(CONTAINER_GROUP_GET_MAX_RETRIES + 1):
+            try:
+                return client.container_groups.get(
+                    resource_group_name=resource_group_name,
+                    container_group_name=container_group_name,
+                )
+            except HttpResponseError as e:
+                is_retryable = e.status_code is not None and e.status_code >= 500
+                if is_retryable and attempt < CONTAINER_GROUP_GET_MAX_RETRIES:
+                    delay = CONTAINER_GROUP_GET_BACKOFF_FACTOR * (2**attempt)
+                    logger.warning(
+                        "Transient Azure API error (HTTP %s) while fetching "
+                        "container group %r, retrying in %.1fs "
+                        "(attempt %d/%d)...",
+                        e.status_code,
+                        container_group_name,
+                        delay,
+                        attempt + 1,
+                        CONTAINER_GROUP_GET_MAX_RETRIES,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+        # Unreachable, but satisfies type checkers
+        raise RuntimeError("Unexpected state in _get_container_group")
 
     def _get_and_stream_output(
         self,
@@ -1006,3 +1041,59 @@ class AzureContainerWorker(
         Writes a line of output to stderr.
         """
         print(line, file=sys.stderr)
+
+    async def kill_infrastructure(
+        self,
+        infrastructure_pid: str,
+        configuration: AzureContainerJobConfiguration,
+        grace_seconds: int = 30,
+    ) -> None:
+        """
+        Kill an Azure Container Instance by stopping or deleting its container group.
+
+        If `configuration.keep_container_group` is True, the container group will be
+        stopped but not deleted. Otherwise, the container group will be deleted.
+
+        Args:
+            infrastructure_pid: The infrastructure identifier in format
+                "flow_run_id:container_group_name".
+            configuration: The job configuration used to connect to Azure.
+            grace_seconds: Not directly used for ACI (Azure handles graceful shutdown).
+
+        Raises:
+            InfrastructureNotFound: If the container group doesn't exist.
+        """
+        # Parse infrastructure_pid (format: "flow_run_id:container_group_name")
+        parts = infrastructure_pid.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid infrastructure_pid format: {infrastructure_pid!r}. "
+                "Expected format: 'flow_run_id:container_group_name'"
+            )
+        _, container_group_name = parts
+
+        aci_client = configuration.aci_credentials.get_container_client(
+            configuration.subscription_id.get_secret_value()
+        )
+
+        try:
+            if configuration.keep_container_group:
+                self._logger.info(
+                    f"{self._log_prefix}: Stopping container group {container_group_name}..."
+                )
+                aci_client.container_groups.stop(
+                    resource_group_name=configuration.resource_group_name,
+                    container_group_name=container_group_name,
+                )
+                self._logger.info(
+                    f"{self._log_prefix}: Stopped container group {container_group_name}"
+                )
+            else:
+                await self._wait_for_container_group_deletion(
+                    aci_client, configuration, container_group_name
+                )
+        except ResourceNotFoundError:
+            raise InfrastructureNotFound(
+                f"Container group {container_group_name!r} not found in resource group "
+                f"{configuration.resource_group_name!r}"
+            )

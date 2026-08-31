@@ -2,9 +2,12 @@
 title: How to run flows on Prefect Managed infrastructure
 sidebarTitle: Run flows on Prefect Managed infrastructure
 description: Learn how Prefect runs deployments on Prefect's infrastructure.
+keywords: ["managed infrastructure", "Prefect Cloud", "serverless", "hosted execution"]
 ---
 
-<span class="badge cloud"></span> Prefect Cloud can run your flows on your behalf with Prefect Managed work pools.
+<span class="badge cloud"></span>
+
+Prefect Cloud can run your flows on your behalf with Prefect Managed work pools.
 
 Flows that run with this work pool do not require a worker or cloud provider
 account—Prefect handles the infrastructure and code execution for you.
@@ -70,15 +73,18 @@ Alternatively, you can create a `requirements.txt` file and reference it in your
 
 ## Networking
 
-### Static Outbound IP addresses
+### Static outbound IP addresses
 
-Flows running on Prefect Managed infrastructure can be assigned static IP addresses on outbound traffic, which will pose as the `source` address for requests interacting with your system or database.
+Flows running on Prefect Managed infrastructure use one of the following static IP addresses for outbound traffic. The address may vary between flow runs.
 
-Include these `source` addresses in your firewall rules to explicitly allow flows to communicate with your environment.
+Include all of these `source` addresses in your firewall rules to allow flows to communicate with your environment.
 
 - `184.73.85.134`
 - `52.4.218.198`
 - `44.217.117.74`
+- `18.233.38.236`
+- `54.227.144.94`
+- `50.19.165.169`
 
 ### Images
 
@@ -92,12 +98,19 @@ You must store flow code in an accessible remote location.
 Prefect supports git-based cloud providers such as GitHub, Bitbucket, or GitLab.
 Remote block-based storage is also supported, so S3, GCS, and Azure Blob are additional code storage options.
 
-### Resources & Limitations
+## Access AWS without static credentials
+
+Prefect Managed work pools can assume an AWS IAM role with web identity federation and inject temporary AWS credentials into each run.
+This lets pull steps and flow code access AWS services without storing static access keys in Prefect Cloud.
+
+See [Use AWS workload identity with Prefect Managed work pools](/v3/how-to-guides/deployment_infra/managed-aws-federated-identity) for setup instructions.
+
+## Resources & Limitations
 
 All flow runs receive:
 - 4vCPUs
-- 16GB of RAM
-- 128GB of ephemeral storage
+- 16 GB of RAM
+- 128 GB of ephemeral storage
 
 Maximum flow run time is limited to 24 hours.
 

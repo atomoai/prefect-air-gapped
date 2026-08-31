@@ -1,13 +1,10 @@
 import { z } from "zod";
-import type { PrefectSchemaObject } from "@/components/schemas/types/schemas";
+import type { WorkerBaseJobTemplate } from "@/components/work-pools/types";
 
-export type WorkerBaseJobTemplate = {
-	job_configuration?: Record<string, unknown>;
-	variables?: PrefectSchemaObject;
-};
+export type { WorkerBaseJobTemplate };
 
 export const infrastructureConfigurationSchema = z.object({
-	baseJobTemplate: z.record(z.unknown()).optional(),
+	baseJobTemplate: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type InfrastructureConfigurationFormValues = z.infer<

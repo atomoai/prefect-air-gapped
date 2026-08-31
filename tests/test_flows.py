@@ -25,10 +25,10 @@ import regex as re
 
 import prefect
 import prefect.exceptions
-from prefect import flow, runtime, tags, task
-from prefect._versioning import GitVersionInfo, VersionInfo, VersionType
+from prefect import flow, tags, task
+from prefect._internal.versioning import GitVersionInfo, VersionInfo, VersionType
 from prefect.blocks.core import Block
-from prefect.client.orchestration import PrefectClient, SyncPrefectClient, get_client
+from prefect.client.orchestration import PrefectClient, SyncPrefectClient
 from prefect.client.schemas.objects import (
     ConcurrencyLimitConfig,
     TaskRunResult,
@@ -333,6 +333,71 @@ class TestResultPersistence:
 
         assert my_flow.persist_result is True
         assert new_flow.persist_result is True
+
+    def test_result_storage_accepts_path_object(self, tmpdir):
+        from pathlib import Path
+
+        storage_path = Path(tmpdir) / "results"
+
+        @flow(result_storage=storage_path)
+        def my_flow():
+            return 42
+
+        assert my_flow.result_storage == storage_path
+        assert my_flow.persist_result is True
+
+    def test_result_storage_with_path_string(self, tmpdir):
+        from pathlib import Path
+
+        storage_path = Path(tmpdir) / "results"
+
+        @flow(result_storage=storage_path, persist_result=True)
+        def my_flow():
+            return {"data": "test"}
+
+        result = my_flow()
+        assert result == {"data": "test"}
+
+    def test_result_storage_path_with_with_options(self, tmpdir):
+        from pathlib import Path
+
+        path1 = Path(tmpdir) / "path1"
+        path2 = Path(tmpdir) / "path2"
+
+        @flow(result_storage=path1)
+        def base():
+            pass
+
+        new_flow = base.with_options(result_storage=path2)
+
+        assert base.result_storage == path1
+        assert new_flow.result_storage == path2
+        assert base.persist_result is True
+        assert new_flow.persist_result is True
+
+    def test_result_storage_path_relative(self):
+        from pathlib import Path
+
+        @flow(result_storage=Path("./relative/path"))
+        def my_flow():
+            return "test"
+
+        assert my_flow.result_storage == Path("./relative/path")
+        assert my_flow.persist_result is True
+
+    def test_result_storage_unsaved_block_still_rejected(self, tmpdir):
+        import pytest
+
+        block = LocalFileSystem(basepath=str(tmpdir))
+
+        with pytest.raises(
+            TypeError,
+            match="Result storage configuration must be persisted server-side",
+        ):
+
+            @flow(result_storage=block)
+            def my_flow():
+                pass
 
 
 class TestFlowWithOptions:
@@ -1459,6 +1524,7 @@ class TestFlowRunTags:
 
 
 class TestFlowTimeouts:
+    @pytest.mark.timeout(method="thread")  # alarm-based pytest-timeout will interfere
     async def test_flows_fail_with_timeout(self):
         @flow(timeout_seconds=0.1)
         def my_flow():
@@ -1519,6 +1585,7 @@ class TestFlowTimeouts:
         assert "exceeded timeout of 0.1 second(s)" in state.message
         assert not completed
 
+    @pytest.mark.timeout(method="thread")  # alarm-based pytest-timeout will interfere
     def test_timeout_stops_execution_at_next_task_for_sync_flows(self, tmp_path):
         """
         Sync flow runs tasks will fail after a timeout which will cause the flow to exit
@@ -1735,6 +1802,22 @@ class TestFlowParameterTypes:
         # input type but applies to exception classes as well.
         # See #1638.
         assert my_flow(data) == data
+
+    def test_serialize_parameters_falls_back_on_self_referential_types(self):
+        @flow
+        def my_flow(x):
+            return x
+
+        class Cyclic:
+            def __init__(self):
+                self.me = self
+
+        data = Cyclic()
+        # jsonable_encoder recurses into unknown objects with no cycle limit, so a
+        # self-referential value raises RecursionError instead of TypeError/ValueError.
+        # serialize_parameters should fall back to the placeholder rather than crash.
+        # See #22244.
+        assert my_flow.serialize_parameters({"x": data}) == {"x": "<Cyclic>"}
 
     def test_flow_parameter_annotations_can_be_non_pydantic_classes(self):
         class Test:
@@ -3643,37 +3726,14 @@ class TestFlowHooksOnCancellation:
         my_flow(return_state=True)
         assert my_mock.mock_calls == [call(), call()]
 
-    # runner handles running on cancellation hooks after sending SIGTERM
-    @pytest.mark.skip(reason="Fails with new engine, passed on old engine")
-    async def test_on_cancellation_hook_called_on_sigterm_from_flow_with_cancelling_state(
-        self, mock_sigterm_handler
+    def test_on_cancellation_hook_called_on_sigterm_when_cancel_intent_is_set(
+        self, mock_sigterm_handler, monkeypatch
     ):
-        my_mock = MagicMock()
+        """When the control listener has flagged `cancel` intent, a
+        SIGTERM raises through the engine's cancel-handling path and fires
+        `on_cancellation` hooks."""
+        monkeypatch.setattr("prefect.flow_engine.get_intent", lambda: "cancel")
 
-        def cancelled(flow, flow_run, state):
-            my_mock("cancelled")
-
-        @task
-        async def cancel_parent():
-            async with get_client() as client:
-                await client.set_flow_run_state(
-                    runtime.flow_run.id, State(type=StateType.CANCELLING), force=True
-                )
-
-        @flow(on_cancellation=[cancelled])
-        async def my_flow():
-            # simulate user cancelling flow run from UI
-            await cancel_parent()
-            # simulate worker cancellation of flow run
-            os.kill(os.getpid(), signal.SIGTERM)
-
-        with pytest.raises(prefect.exceptions.TerminationSignal):
-            await my_flow(return_state=True)
-        assert my_mock.mock_calls == [call("cancelled")]
-
-    async def test_on_cancellation_hook_not_called_on_sigterm_from_flow_without_cancelling_state(
-        self, mock_sigterm_handler
-    ):
         my_mock = MagicMock()
 
         def cancelled(flow, flow_run, state):
@@ -3681,12 +3741,77 @@ class TestFlowHooksOnCancellation:
 
         @flow(on_cancellation=[cancelled])
         def my_flow():
-            # terminate process with SIGTERM
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        with pytest.raises(prefect.exceptions.TerminationSignal):
+            my_flow(return_state=True)
+        assert my_mock.mock_calls == [call("cancelled")]
+
+    async def test_on_cancellation_hook_not_called_on_sigterm_without_intent(
+        self, mock_sigterm_handler
+    ):
+        """A SIGTERM with no cancellation intent set on the listener should be
+        treated as a crash, not a cancellation. `on_cancellation` hooks must
+        not fire."""
+        my_mock = MagicMock()
+
+        def cancelled(flow, flow_run, state):
+            my_mock("cancelled")
+
+        @flow(on_cancellation=[cancelled])
+        def my_flow():
             os.kill(os.getpid(), signal.SIGTERM)
 
         with pytest.raises(prefect.exceptions.TerminationSignal):
             my_flow(return_state=True)
         my_mock.assert_not_called()
+
+    def test_on_cancellation_hooks_fire_on_nested_subflow_when_intent_is_set(
+        self, mock_sigterm_handler, monkeypatch
+    ):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/12714.
+
+        When a parent flow run is cancelled (SIGTERM + cancel intent), nested
+        subflows running in the same process must also fire their
+        `on_cancellation` hooks — not `on_crashed`. The intent is stored as a
+        process-global flag in `prefect._internal.control_listener`, which
+        the engine's `except TerminationSignal` block reads at
+        exception-handling time via `get_intent()`. Nested subflows inherit
+        the outcome simply because they execute in the same process — there
+        is no ContextVar propagation involved.
+        """
+        monkeypatch.setattr("prefect.flow_engine.get_intent", lambda: "cancel")
+
+        parent_mock = MagicMock()
+        child_mock = MagicMock()
+
+        def parent_cancel_hook(flow, flow_run, state):
+            parent_mock("parent_cancelled")
+
+        def child_cancel_hook(flow, flow_run, state):
+            child_mock("child_cancelled")
+
+        def child_crashed_hook(flow, flow_run, state):
+            child_mock("child_crashed")
+
+        @flow(
+            on_cancellation=[child_cancel_hook],
+            on_crashed=[child_crashed_hook],
+        )
+        def child_flow():
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        @flow(on_cancellation=[parent_cancel_hook])
+        def parent_flow():
+            child_flow()
+
+        with pytest.raises(prefect.exceptions.TerminationSignal):
+            parent_flow(return_state=True)
+
+        # Child fired on_cancellation (not on_crashed)
+        assert child_mock.mock_calls == [call("child_cancelled")]
+        # Parent also fired on_cancellation
+        assert parent_mock.mock_calls == [call("parent_cancelled")]
 
     def test_on_cancellation_hooks_respect_env_var(self, monkeypatch):
         my_mock = MagicMock()
@@ -3884,11 +4009,11 @@ class TestFlowHooksOnCrashed:
         my_flow(return_state=True)
         assert my_mock.mock_calls == [call("crashed1"), call("failed1")]
 
-    # runner handles running on crashed hooks by monitoring the process the flow is running in
-    @pytest.mark.skip(reason="Fails with new engine, passed on old engine")
-    async def test_on_crashed_hook_called_on_sigterm_from_flow_without_cancelling_state(
+    def test_on_crashed_hook_called_on_sigterm_without_intent(
         self, mock_sigterm_handler
     ):
+        """A SIGTERM with no cancellation intent should fire on_crashed
+        hooks — it's an unexpected termination, not a runner cancellation."""
         my_mock = MagicMock()
 
         def crashed(flow, flow_run, state):
@@ -3896,40 +4021,33 @@ class TestFlowHooksOnCrashed:
 
         @flow(on_crashed=[crashed])
         def my_flow():
-            # terminate process with SIGTERM
             os.kill(os.getpid(), signal.SIGTERM)
 
         with pytest.raises(prefect.exceptions.TerminationSignal):
-            await my_flow(return_state=True)
+            my_flow(return_state=True)
         assert my_mock.mock_calls == [call("crashed")]
 
-    async def test_on_crashed_hook_called_on_sigterm_from_flow_with_cancelling_state(
-        self, mock_sigterm_handler
+    def test_on_crashed_hook_not_called_when_cancel_intent_is_set(
+        self, mock_sigterm_handler, monkeypatch
     ):
+        """When cancel intent is flagged on the control listener, SIGTERM
+        routes through handle_cancellation — on_crashed must NOT fire."""
+        monkeypatch.setattr("prefect.flow_engine.get_intent", lambda: "cancel")
+
         my_mock = MagicMock()
 
         def crashed(flow, flow_run, state):
             my_mock("crashed")
 
-        @task
-        async def cancel_parent():
-            async with get_client() as client:
-                await client.set_flow_run_state(
-                    runtime.flow_run.id, State(type=StateType.CANCELLING), force=True
-                )
-
         @flow(on_crashed=[crashed])
-        async def my_flow():
-            # simulate user cancelling flow run from UI
-            await cancel_parent()
-            # simulate worker cancellation of flow run
+        def my_flow():
             os.kill(os.getpid(), signal.SIGTERM)
 
         with pytest.raises(prefect.exceptions.TerminationSignal):
-            await my_flow(return_state=True)
-        my_mock.assert_called_once()
+            my_flow(return_state=True)
+        my_mock.assert_not_called()
 
-    def test_on_crashed_hooks_respect_env_var(self, monkeypatch):
+    def test_on_crashed_hooks_remain_engine_owned_with_env_var_false(self, monkeypatch):
         my_mock = MagicMock()
         monkeypatch.setenv("PREFECT__ENABLE_CANCELLATION_AND_CRASHED_HOOKS", "false")
 
@@ -3945,7 +4063,7 @@ class TestFlowHooksOnCrashed:
 
         state = my_flow(return_state=True)
         assert state.type == StateType.CRASHED
-        my_mock.assert_not_called()
+        assert my_mock.mock_calls == [call("crashed_hook1"), call("crashed_hook2")]
 
 
 class TestFlowHooksOnRunning:
@@ -4167,9 +4285,10 @@ class TestFlowToDeployment:
             deployment = self.flow.to_deployment(name="test", rrule="FREQ=MINUTELY")
 
             assert deployment.schedules
-            assert deployment.schedules[0].schedule == RRuleSchedule(
-                rrule="FREQ=MINUTELY"
-            )
+            # `DeploymentScheduleCreate` injects an explicit DTSTART (#21362).
+            schedule = deployment.schedules[0].schedule
+            assert isinstance(schedule, RRuleSchedule)
+            assert schedule.rrule.endswith("FREQ=MINUTELY")
 
         def test_to_deployment_invalid_name_raises(self):
             with pytest.raises(InvalidNameError, match="contains an invalid character"):
@@ -4336,9 +4455,10 @@ class TestFlowToDeployment:
             )
 
             assert deployment.schedules
-            assert deployment.schedules[0].schedule == RRuleSchedule(
-                rrule="FREQ=MINUTELY"
-            )
+            # `DeploymentScheduleCreate` injects an explicit DTSTART (#21362).
+            schedule = deployment.schedules[0].schedule
+            assert isinstance(schedule, RRuleSchedule)
+            assert schedule.rrule.endswith("FREQ=MINUTELY")
 
         async def test_to_deployment_invalid_name_raises(self):
             with pytest.raises(InvalidNameError, match="contains an invalid character"):
@@ -4540,7 +4660,10 @@ class TestFlowServe:
 
         assert deployment is not None
         assert len(deployment.schedules) == 1
-        assert deployment.schedules[0].schedule == RRuleSchedule(rrule="FREQ=MINUTELY")
+        # `DeploymentScheduleCreate` injects an explicit DTSTART (#21362).
+        schedule = deployment.schedules[0].schedule
+        assert isinstance(schedule, RRuleSchedule)
+        assert schedule.rrule.endswith("FREQ=MINUTELY")
 
     def test_serve_creates_deployment_with_schedules_with_parameters(
         self, sync_prefect_client: SyncPrefectClient
@@ -4683,6 +4806,38 @@ def test_flow():
         if self._base_path:
             with open(self._base_path / "flows.py", "w") as f:
                 f.write(code)
+
+    def to_pull_step(self):
+        return {}
+
+
+class MockModuleStorage:
+    """
+    A mock storage class that writes a Python package structure for module path testing.
+    """
+
+    def __init__(self):
+        self._base_path = Path.cwd()
+
+    def set_base_path(self, path: Path):
+        self._base_path = path
+
+    @property
+    def destination(self):
+        return self._base_path
+
+    @property
+    def pull_interval(self):
+        return 60
+
+    async def pull_code(self):
+        if self._base_path:
+            pkg_dir = self._base_path / "mypackage"
+            pkg_dir.mkdir(exist_ok=True)
+            (pkg_dir / "__init__.py").write_text("")
+            (pkg_dir / "flows.py").write_text(
+                "from prefect import flow\n\n@flow\ndef test_flow():\n    return 1\n"
+            )
 
     def to_pull_step(self):
         return {}
@@ -4910,12 +5065,57 @@ class TestFlowFromSource:
 
             pull_code_spy.assert_not_called()
 
+    class TestModulePath:
+        def test_from_source_with_module_path_entrypoint(self):
+            storage = MockModuleStorage()
+
+            loaded_flow = Flow.from_source(
+                entrypoint="mypackage.flows.test_flow", source=storage
+            )
+
+            assert isinstance(loaded_flow, Flow)
+            assert loaded_flow.name == "test-flow"
+            assert loaded_flow._entrypoint == "mypackage.flows.test_flow"
+
+        async def test_afrom_source_with_module_path_entrypoint(self):
+            storage = MockModuleStorage()
+
+            loaded_flow = await Flow.afrom_source(
+                entrypoint="mypackage.flows.test_flow", source=storage
+            )
+
+            assert isinstance(loaded_flow, Flow)
+            assert loaded_flow.name == "test-flow"
+            assert loaded_flow._entrypoint == "mypackage.flows.test_flow"
+
+        def test_from_source_with_module_path_does_not_pollute_sys_path(self):
+            import sys
+
+            storage = MockModuleStorage()
+            original_path = sys.path.copy()
+
+            Flow.from_source(entrypoint="mypackage.flows.test_flow", source=storage)
+
+            assert sys.path == original_path
+
+        async def test_afrom_source_with_module_path_does_not_pollute_sys_path(self):
+            import sys
+
+            storage = MockModuleStorage()
+            original_path = sys.path.copy()
+
+            await Flow.afrom_source(
+                entrypoint="mypackage.flows.test_flow", source=storage
+            )
+
+            assert sys.path == original_path
+
 
 class TestFlowDeploy:
     @pytest.fixture
     def mock_deploy(self, monkeypatch):
         mock = AsyncMock()
-        monkeypatch.setattr("prefect.deployments.runner.deploy", mock)
+        monkeypatch.setattr("prefect.deployments.runner.adeploy", mock)
         return mock
 
     @pytest.fixture
@@ -5230,6 +5430,82 @@ class TestFlowDeploy:
         )
 
 
+class TestFlowDeployAsyncDispatch:
+    """Tests for async_dispatch behavior of Flow.deploy."""
+
+    def test_aio_attribute_exists(self):
+        """Test that Flow.deploy has .aio attribute for backward compatibility."""
+
+        @flow
+        def my_flow():
+            pass
+
+        assert hasattr(my_flow.deploy, "aio")
+
+    async def test_adeploy_works_in_async_context(
+        self, work_pool_with_image_variable, monkeypatch
+    ):
+        """Test that Flow.adeploy works when awaited directly."""
+        mock_deploy = AsyncMock(return_value=["test-deployment-id"])
+        monkeypatch.setattr("prefect.deployments.runner.adeploy", mock_deploy)
+
+        @flow
+        def my_flow():
+            pass
+
+        await my_flow.adeploy(
+            name="test-deployment",
+            work_pool_name=work_pool_with_image_variable.name,
+            image="my-repo/my-image",
+            build=False,
+            print_next_steps=False,
+        )
+
+        mock_deploy.assert_awaited_once()
+
+    async def test_deploy_dispatches_to_adeploy_in_async_context(
+        self, work_pool_with_image_variable, monkeypatch
+    ):
+        """Test that Flow.deploy dispatches to adeploy in async context."""
+        mock_deploy = AsyncMock(return_value=["test-deployment-id"])
+        monkeypatch.setattr("prefect.deployments.runner.adeploy", mock_deploy)
+
+        @flow
+        def my_flow():
+            pass
+
+        await my_flow.deploy(
+            name="test-deployment",
+            work_pool_name=work_pool_with_image_variable.name,
+            image="my-repo/my-image",
+            build=False,
+            print_next_steps=False,
+        )
+
+        mock_deploy.assert_awaited_once()
+
+    def test_deploy_works_in_sync_context(
+        self, work_pool_with_image_variable, monkeypatch
+    ):
+        """Test that Flow.deploy works in sync context."""
+        mock_deploy = AsyncMock(return_value=["test-deployment-id"])
+        monkeypatch.setattr("prefect.deployments.runner.adeploy", mock_deploy)
+
+        @flow
+        def my_flow():
+            pass
+
+        my_flow.deploy(
+            name="test-deployment",
+            work_pool_name=work_pool_with_image_variable.name,
+            image="my-repo/my-image",
+            build=False,
+            print_next_steps=False,
+        )
+
+        mock_deploy.assert_awaited_once()
+
+
 class TestLoadFlowFromFlowRun:
     async def test_load_flow_from_module_entrypoint(
         self, prefect_client: "PrefectClient", monkeypatch
@@ -5259,6 +5535,100 @@ class TestLoadFlowFromFlowRun:
         result = await load_flow_from_flow_run(flow_run)
 
         assert result == pretend_flow
+        load_flow_from_entrypoint.assert_called_once_with(
+            "my.module.pretend_flow", use_placeholder_flow=True
+        )
+
+    async def test_load_flow_from_module_entrypoint_runs_pull_steps(
+        self, prefect_client: "PrefectClient", monkeypatch
+    ):
+        """Module-path entrypoints must run pull steps before importing the flow.
+
+        Regression test for https://github.com/PrefectHQ/prefect/issues/18138
+        """
+
+        @flow
+        def pretend_flow():
+            pass
+
+        load_flow_from_entrypoint = mock.MagicMock(return_value=pretend_flow)
+        monkeypatch.setattr(
+            "prefect.flows.load_flow_from_entrypoint",
+            load_flow_from_entrypoint,
+        )
+
+        run_steps = mock.AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "prefect.deployments.steps.core.run_steps",
+            run_steps,
+        )
+
+        flow_id = await prefect_client.create_flow_from_name(pretend_flow.__name__)
+
+        deployment_id = await prefect_client.create_deployment(
+            name="My Module Deployment",
+            entrypoint="my.module.pretend_flow",
+            flow_id=flow_id,
+            pull_steps=[
+                {"prefect.deployments.steps.set_working_directory": {"directory": "."}}
+            ],
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(
+            deployment_id=deployment_id
+        )
+
+        result = await load_flow_from_flow_run(flow_run)
+
+        assert result == pretend_flow
+        run_steps.assert_awaited_once()
+        load_flow_from_entrypoint.assert_called_once_with(
+            "my.module.pretend_flow", use_placeholder_flow=True
+        )
+
+    async def test_load_flow_from_module_entrypoint_skips_pull_steps_when_ignoring_storage(
+        self, prefect_client: "PrefectClient", monkeypatch
+    ):
+        """ignore_storage=True assumes the flow is local, so pull steps are skipped.
+
+        Regression test for https://github.com/PrefectHQ/prefect/issues/18138
+        """
+
+        @flow
+        def pretend_flow():
+            pass
+
+        load_flow_from_entrypoint = mock.MagicMock(return_value=pretend_flow)
+        monkeypatch.setattr(
+            "prefect.flows.load_flow_from_entrypoint",
+            load_flow_from_entrypoint,
+        )
+
+        run_steps = mock.AsyncMock(return_value={})
+        monkeypatch.setattr(
+            "prefect.deployments.steps.core.run_steps",
+            run_steps,
+        )
+
+        flow_id = await prefect_client.create_flow_from_name(pretend_flow.__name__)
+
+        deployment_id = await prefect_client.create_deployment(
+            name="My Module Deployment",
+            entrypoint="my.module.pretend_flow",
+            flow_id=flow_id,
+            pull_steps=[
+                {"prefect.deployments.steps.set_working_directory": {"directory": "."}}
+            ],
+        )
+
+        flow_run = await prefect_client.create_flow_run_from_deployment(
+            deployment_id=deployment_id
+        )
+
+        result = await load_flow_from_flow_run(flow_run, ignore_storage=True)
+
+        assert result == pretend_flow
+        run_steps.assert_not_awaited()
         load_flow_from_entrypoint.assert_called_once_with(
             "my.module.pretend_flow", use_placeholder_flow=True
         )

@@ -1,3 +1,4 @@
+import logging
 import shutil
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from prefect.settings import PREFECT_DEBUG_MODE, temporary_settings
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 from prefect.utilities.filesystem import tmpchdir
 
+pytestmark = pytest.mark.clear_db
+
 TEST_PROJECTS_DIR = prefect.__development_base_path__ / "tests" / "test-projects"
 
 
@@ -27,7 +30,7 @@ def project_dir(tmp_path: Path):
 class TestDiscoverFlows:
     async def test_find_all_flows_in_dir_tree(self, project_dir: Path):
         flows = await search_for_flow_functions(str(project_dir))
-        assert len(flows) == 7, f"Expected 7 flows, found {len(flows)}"
+        assert len(flows) == 8, f"Expected 8 flows, found {len(flows)}"
 
         expected_flows = [
             {
@@ -53,6 +56,13 @@ class TestDiscoverFlows:
                 "flow_name": "Second important name",
                 "function_name": "my_flow2",
                 "filepath": str(project_dir / "flows" / "hello.py"),
+            },
+            {
+                "flow_name": "failed",
+                "function_name": "failed_flow",
+                "filepath": str(
+                    project_dir / "import-project" / "my_module" / "flow.py"
+                ),
             },
             {
                 "flow_name": "test",
@@ -91,6 +101,10 @@ class TestDiscoverFlows:
     async def test_find_flow_functions_in_file_returns_empty_list_on_file_error(
         self, caplog: pytest.LogCaptureFixture
     ):
+        # Force the `prefect` logger to DEBUG so the debug-mode message is
+        # captured regardless of the ambient log level left by other tests;
+        # otherwise the record is filtered out and caplog is empty.
+        caplog.set_level(logging.DEBUG, logger="prefect")
         with temporary_settings({PREFECT_DEBUG_MODE: True}):
             assert await find_flow_functions_in_file(AnyioPath("foo.py")) == []
             assert "Could not open foo.py" in caplog.text
@@ -126,3 +140,24 @@ class TestDiscoverFlows:
             import prefect  # noqa: F401
 
         await run_sync_in_worker_thread(import_prefect)
+
+    async def test_search_for_flow_functions_returns_deterministic_order(
+        self, project_dir: Path
+    ):
+        """Regression test: search_for_flow_functions should return flows in a deterministic order across multiple invocations."""
+
+        results = []
+        for _ in range(5):
+            flows = await search_for_flow_functions(str(project_dir))
+            results.append(flows)
+
+        first_result = results[0]
+        assert first_result, (
+            "search_for_flow_functions did not discover any flows; "
+            "this may indicate a regression in flow discovery."
+        )
+        for result in results[1:]:
+            assert result == first_result, (
+                "search_for_flow_functions returned flows in different order. "
+                "Expected deterministic ordering."
+            )

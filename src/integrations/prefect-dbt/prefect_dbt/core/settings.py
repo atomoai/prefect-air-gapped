@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Generator
 
 import yaml
-from dbt_common.events.base_types import EventLevel
+
+try:
+    from dbt_common.events.base_types import EventLevel
+except ImportError:
+    from dbt.events.base_types import EventLevel  # type: ignore[no-redef]
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -51,6 +55,37 @@ class PrefectDbtSettings(BaseSettings):
         description="The path to the dbt target directory (relative to project_dir).",
     )
 
+    def validate_for_orchestrator(self) -> None:
+        """Validate that configured directories exist and contain expected files.
+
+        Call this before running dbt operations that require both
+        `profiles_dir` and `project_dir` to be valid on disk.
+
+        Raises:
+            ValueError: If `profiles_dir` or `project_dir` do not exist,
+                or if the expected files are missing.
+        """
+        if not self.profiles_dir.exists():
+            raise ValueError(
+                f'profiles_dir "{self.profiles_dir}" does not exist.'
+                " Pass profiles_dir explicitly to PrefectDbtSettings."
+            )
+        if not (self.profiles_dir / "profiles.yml").exists():
+            raise ValueError(
+                f'No profiles.yml found in profiles_dir "{self.profiles_dir}".'
+                " Pass profiles_dir explicitly to PrefectDbtSettings."
+            )
+        if not self.project_dir.exists():
+            raise ValueError(
+                f'project_dir "{self.project_dir}" does not exist.'
+                " Pass project_dir explicitly to PrefectDbtSettings."
+            )
+        if not (self.project_dir / "dbt_project.yml").exists():
+            raise ValueError(
+                f'No dbt_project.yml found in project_dir "{self.project_dir}".'
+                " Pass project_dir explicitly to PrefectDbtSettings."
+            )
+
     def load_profiles_yml(self) -> dict[str, Any]:
         """
         Load and parse the profiles.yml file.
@@ -72,9 +107,6 @@ class PrefectDbtSettings(BaseSettings):
     def resolve_profiles_yml(self) -> Generator[str, None, None]:
         """
         Context manager that creates a temporary directory with a resolved profiles.yml file.
-
-        Args:
-            include_profiles: Whether to include the resolved profiles.yml in the yield.
 
         Yields:
             str: Path to temporary directory containing the resolved profiles.yml.

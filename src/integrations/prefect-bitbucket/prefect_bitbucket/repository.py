@@ -36,20 +36,22 @@ private_bitbucket_block.save(name="my-private-bitbucket-block")
 """
 
 import io
+import subprocess
 from pathlib import Path
 from shutil import copytree
 from tempfile import TemporaryDirectory
 from typing import Optional, Tuple, Union
-from urllib.parse import quote, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
+from prefect._internal.compatibility.async_dispatch import async_dispatch
+from prefect._internal.urls import strip_auth_from_urls_in_text
 from prefect.exceptions import InvalidRepositoryURLError
 from prefect.filesystems import ReadableDeploymentStorage
-from prefect.utilities.asyncutils import sync_compatible
 from prefect.utilities.processutils import run_process
-from prefect_bitbucket.credentials import BitBucketCredentials
+from prefect_bitbucket.credentials import BitBucketCredentials, _quote_credential
 
 
 class BitBucketRepository(ReadableDeploymentStorage):
@@ -124,8 +126,8 @@ class BitBucketRepository(ReadableDeploymentStorage):
             if username is None:
                 username = "x-token-auth"
             # Encode special characters in username and token
-            safe_username = quote(username or "")
-            safe_token = quote(token or "")
+            safe_username = _quote_credential(username or "")
+            safe_token = _quote_credential(token or "")
             updated_components = url_components._replace(
                 netloc=f"{safe_username}:{safe_token}@{url_components.netloc}"
             )
@@ -134,6 +136,22 @@ class BitBucketRepository(ReadableDeploymentStorage):
             full_url = self.repository
 
         return full_url
+
+    def _git_error_extra_secrets(self) -> list[str]:
+        if self.bitbucket_credentials is None or not self.bitbucket_credentials.token:
+            return []
+
+        token = self.bitbucket_credentials.token.get_secret_value()
+        username = self.bitbucket_credentials.username or "x-token-auth"
+        quoted_token = _quote_credential(token)
+        quoted_username = _quote_credential(username)
+
+        return [
+            token,
+            quoted_token,
+            f"{username}:{token}",
+            f"{quoted_username}:{quoted_token}",
+        ]
 
     @staticmethod
     def _get_paths(
@@ -157,20 +175,18 @@ class BitBucketRepository(ReadableDeploymentStorage):
 
         return str(content_source), str(content_destination)
 
-    @sync_compatible
-    async def get_directory(
+    async def aget_directory(
         self, from_path: Optional[str] = None, local_path: Optional[str] = None
     ) -> None:
         """Clones a BitBucket project within `from_path` to the provided `local_path`.
 
         This defaults to cloning the repository reference configured on the
-        Block to the present working directory.
+        Block to the present working directory. Async version.
 
         Args:
             from_path: If provided, interpreted as a subdirectory of the underlying
                 repository that will be copied to the provided local path.
             local_path: A local path to clone to; defaults to present working directory.
-
         """
         # Construct command
         cmd = ["git", "clone", self._create_repo_url()]
@@ -189,7 +205,46 @@ class BitBucketRepository(ReadableDeploymentStorage):
             process = await run_process(cmd, stream_output=(out_stream, err_stream))
             if process.returncode != 0:
                 err_stream.seek(0)
-                raise OSError(f"Failed to pull from remote:\n {err_stream.read()}")
+                sanitized_error = strip_auth_from_urls_in_text(
+                    err_stream.read(), extra_secrets=self._git_error_extra_secrets()
+                )
+                raise OSError(f"Failed to pull from remote:\n {sanitized_error}")
+
+            content_source, content_destination = self._get_paths(
+                dst_dir=local_path, src_dir=tmp_dir, sub_directory=from_path
+            )
+
+            copytree(src=content_source, dst=content_destination, dirs_exist_ok=True)
+
+    @async_dispatch(aget_directory)
+    def get_directory(
+        self, from_path: Optional[str] = None, local_path: Optional[str] = None
+    ) -> None:
+        """Clones a BitBucket project within `from_path` to the provided `local_path`.
+
+        This defaults to cloning the repository reference configured on the
+        Block to the present working directory.
+
+        Args:
+            from_path: If provided, interpreted as a subdirectory of the underlying
+                repository that will be copied to the provided local path.
+            local_path: A local path to clone to; defaults to present working directory.
+        """
+        cmd = ["git", "clone", self._create_repo_url()]
+        if self.reference:
+            cmd += ["-b", self.reference]
+
+        cmd += ["--depth", "1"]
+
+        with TemporaryDirectory(suffix="prefect") as tmp_dir:
+            cmd.append(tmp_dir)
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                sanitized_error = strip_auth_from_urls_in_text(
+                    result.stderr, extra_secrets=self._git_error_extra_secrets()
+                )
+                raise OSError(f"Failed to pull from remote:\n {sanitized_error}")
 
             content_source, content_destination = self._get_paths(
                 dst_dir=local_path, src_dir=tmp_dir, sub_directory=from_path

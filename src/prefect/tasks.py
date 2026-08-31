@@ -10,6 +10,7 @@ import datetime
 import inspect
 from copy import copy
 from functools import partial, update_wrapper
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -40,6 +41,8 @@ from typing_extensions import (
 )
 
 import prefect.states
+from prefect._flow_run_suspension import raise_if_flow_run_suspension_requested
+from prefect._internal.compatibility.async_dispatch import async_dispatch
 from prefect._internal.uuid7 import uuid7
 from prefect.assets import Asset
 from prefect.cache_policies import DEFAULT, NO_CACHE, CachePolicy
@@ -68,7 +71,7 @@ from prefect.results import (
 from prefect.settings.context import get_current_settings
 from prefect.states import Pending, Scheduled, State
 from prefect.utilities.annotations import NotSet
-from prefect.utilities.asyncutils import run_coro_as_sync, sync_compatible
+from prefect.utilities.asyncutils import run_coro_as_sync
 from prefect.utilities.callables import (
     expand_mapping_parameters,
     get_call_parameters,
@@ -243,6 +246,8 @@ def _infer_parent_task_runs(
     # there is an active flow run context because dependencies are only
     # tracked within the same flow run.
     if flow_run_context:
+        from prefect.utilities.engine import get_state_for_result
+
         for v in parameters.values():
             upstream_state = None
 
@@ -251,7 +256,9 @@ def _infer_parent_task_runs(
             elif isinstance(v, PrefectFuture):
                 upstream_state = v.state
             else:
-                res = flow_run_context.run_results.get(id(v))
+                # Route through the central lookup so identity
+                # verification (#20558) is applied to every read site.
+                res = get_state_for_result(v)
                 if res:
                     upstream_state, _ = res
 
@@ -342,7 +349,11 @@ class Task(Generic[P, R]):
             indicates that the global default should be used (which is `True` by
             default).
         result_storage: An optional block to use to persist the result of this task.
-            Defaults to the value set in the flow the task is called in.
+            This can be either a saved block instance or a string reference (e.g.,
+            "local-file-system/my-storage"). Block instances must have `.save()` called
+            first since decorators execute at import time. String references are resolved
+            at runtime and recommended for testing scenarios. Defaults to the value set
+            in the flow the task is called in.
         result_storage_key: An optional key to store the result in storage at when persisted.
             Defaults to a unique identifier.
         result_serializer: An optional serializer to use to serialize the result of this
@@ -451,6 +462,14 @@ class Task(Generic[P, R]):
         update_wrapper(self, fn)
         self.fn = fn
 
+        # Capture source code for cache key computation
+        # This is stored on the task so it survives cloudpickle serialization
+        # to remote environments where the source file is not available
+        try:
+            self.source_code: str | None = inspect.getsource(fn)
+        except (TypeError, OSError):
+            self.source_code = None
+
         # the task is considered async if its function is async or an async
         # generator
         self.isasync: bool = inspect.iscoroutinefunction(
@@ -489,6 +508,7 @@ class Task(Generic[P, R]):
         self.task_key: str = _generate_task_key(self.fn)
 
         # determine cache and result configuration
+        self._user_cache_policy = cache_policy
         settings = get_current_settings()
         if settings.tasks.default_no_cache and cache_policy is NotSet:
             cache_policy = NO_CACHE
@@ -507,6 +527,7 @@ class Task(Generic[P, R]):
         self.refresh_cache = refresh_cache
 
         # result persistence settings
+        self._user_persist_result = persist_result
         if persist_result is None:
             if any(
                 [
@@ -571,11 +592,12 @@ class Task(Generic[P, R]):
         self.retry_jitter_factor = retry_jitter_factor
         self.persist_result = persist_result
 
-        if result_storage and not isinstance(result_storage, str):
+        if result_storage and not isinstance(result_storage, (str, Path)):
             if getattr(result_storage, "_block_document_id", None) is None:
                 raise TypeError(
                     "Result storage configuration must be persisted server-side."
-                    " Please call `.save()` on your block before passing it in."
+                    " Please call `.save()` on your block before passing it in,"
+                    " or use a string reference like 'local-file-system/my-storage' instead."
                 )
 
         self.result_storage = result_storage
@@ -772,7 +794,7 @@ class Task(Generic[P, R]):
             tags=tags or copy(self.tags),
             cache_policy=cache_policy
             if cache_policy is not NotSet
-            else self.cache_policy,
+            else self._user_cache_policy,
             cache_key_fn=cache_key_fn or self.cache_key_fn,
             cache_expiration=cache_expiration or self.cache_expiration,
             task_run_name=task_run_name
@@ -790,7 +812,9 @@ class Task(Generic[P, R]):
                 else self.retry_jitter_factor
             ),
             persist_result=(
-                persist_result if persist_result is not NotSet else self.persist_result
+                persist_result
+                if persist_result is not NotSet
+                else self._user_persist_result
             ),
             result_storage=(
                 result_storage if result_storage is not NotSet else self.result_storage
@@ -860,7 +884,7 @@ class Task(Generic[P, R]):
         extra_task_inputs: Optional[dict[str, set[RunInput]]] = None,
         deferred: bool = False,
     ) -> TaskRun:
-        from prefect.utilities._engine import dynamic_key_for_task_run
+        from prefect._internal.engine import dynamic_key_for_task_run
         from prefect.utilities.engine import collect_task_run_inputs_sync
 
         if flow_run_context is None:
@@ -876,6 +900,19 @@ class Task(Generic[P, R]):
             if not flow_run_context:
                 dynamic_key = f"{self.task_key}-{str(uuid4().hex)}"
                 task_run_name = self.name
+            elif (
+                getattr(self, "_is_subflow_tracking_task", False)
+                and parent_task_run_context
+                and flow_run_context.flow_run
+                and parent_task_run_context.task_run.flow_run_id
+                == flow_run_context.flow_run.id
+            ):
+                # Subflows called from a task context need UUID keys because
+                # sibling call order is not a reliable identity across retries.
+                dynamic_key = dynamic_key_for_task_run(
+                    context=flow_run_context, task=self, stable=False
+                )
+                task_run_name = f"{self.name}-{dynamic_key}"
             else:
                 dynamic_key = dynamic_key_for_task_run(
                     context=flow_run_context, task=self
@@ -901,7 +938,7 @@ class Task(Generic[P, R]):
 
                 store = await ResultStore(
                     result_storage=await get_or_create_default_task_scheduling_storage()
-                ).update_for_task(self)
+                ).aupdate_for_task(self)
                 context = serialize_context()
                 data: dict[str, Any] = {"context": context}
                 if parameters:
@@ -963,7 +1000,7 @@ class Task(Generic[P, R]):
         extra_task_inputs: Optional[dict[str, set[RunInput]]] = None,
         deferred: bool = False,
     ) -> TaskRun:
-        from prefect.utilities._engine import dynamic_key_for_task_run
+        from prefect._internal.engine import dynamic_key_for_task_run
         from prefect.utilities.engine import (
             collect_task_run_inputs_sync,
         )
@@ -1006,7 +1043,7 @@ class Task(Generic[P, R]):
 
                 store = await ResultStore(
                     result_storage=await get_or_create_default_task_scheduling_storage()
-                ).update_for_task(self)
+                ).aupdate_for_task(self)
                 context = serialize_context()
                 data: dict[str, Any] = {"context": context}
                 if parameters:
@@ -1074,83 +1111,97 @@ class Task(Generic[P, R]):
 
             return task_run
 
+    # PRIORITY OVERLOADS: Clean ParamSpec signatures for normal usage (no return_state/wait_for)
+    # These preserve full parameter type checking when users call tasks normally
+    @overload
+    def __call__(
+        self: "Task[P, Coroutine[Any, Any, T]]",
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, T]: ...
+
+    @overload
+    def __call__(
+        self: "Task[P, T]",
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T: ...
+
     @overload
     def __call__(
         self: "Task[P, NoReturn]",
         *args: P.args,
-        return_state: Literal[False] = False,
-        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
         **kwargs: P.kwargs,
     ) -> None:
         # `NoReturn` matches if a type can't be inferred for the function which stops a
         # sync function from matching the `Coroutine` overload
         ...
 
+    # SECONDARY OVERLOADS: With return_state/wait_for using Any
+    # When return_state or wait_for are used, we can't preserve ParamSpec semantics,
+    # so we use Any for parameters. This is an acceptable tradeoff since these
+    # are advanced use cases.
     @overload
     def __call__(
-        self: "Task[P, Coroutine[Any, Any, R]]",
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, R]: ...
+        self: "Task[..., Coroutine[Any, Any, T]]",
+        *args: Any,
+        return_state: Literal[False],
+        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
+        **kwargs: Any,
+    ) -> Coroutine[Any, Any, T]: ...
 
     @overload
     def __call__(
-        self: "Task[P, R]",
-        *args: P.args,
-        **kwargs: P.kwargs,
-    ) -> R: ...
+        self: "Task[..., Coroutine[Any, Any, T]]",
+        *args: Any,
+        return_state: Literal[True],
+        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
+        **kwargs: Any,
+    ) -> State[T]: ...
 
-    # Keyword parameters `return_state` and `wait_for` aren't allowed after the
-    # ParamSpec `*args` parameter, so we lose return type typing when either of
-    # those are provided.
-    # TODO: Find a way to expose this functionality without losing type information
-
-    # NOTE: return_state=False overloads must come before return_state=True
-    # When pyright can't match argument types, it falls back to these overloads with *args
-    # and picks the first match. We want the default (False) behavior.
     @overload
     def __call__(
-        self: "Task[P, Coroutine[Any, Any, R]]",
-        *args: P.args,
+        self: "Task[..., T]",
+        *args: Any,
+        return_state: Literal[False],
+        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
+        **kwargs: Any,
+    ) -> T: ...
+
+    @overload
+    def __call__(
+        self: "Task[..., T]",
+        *args: Any,
+        return_state: Literal[True],
+        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
+        **kwargs: Any,
+    ) -> State[T]: ...
+
+    @overload
+    def __call__(
+        self: "Task[..., Coroutine[Any, Any, T]]",
+        *args: Any,
+        wait_for: OneOrManyFutureOrResult[Any],
         return_state: Literal[False] = False,
-        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
-        **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, R]: ...
+        **kwargs: Any,
+    ) -> Coroutine[Any, Any, T]: ...
 
     @overload
     def __call__(
-        self: "Task[P, Coroutine[Any, Any, R]]",
-        *args: P.args,
-        return_state: Literal[True] = True,
-        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
-        **kwargs: P.kwargs,
-    ) -> State[R]: ...
-
-    @overload
-    def __call__(
-        self: "Task[P, R]",
-        *args: P.args,
+        self: "Task[..., T]",
+        *args: Any,
+        wait_for: OneOrManyFutureOrResult[Any],
         return_state: Literal[False] = False,
-        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
-        **kwargs: P.kwargs,
-    ) -> R: ...
-
-    @overload
-    def __call__(
-        self: "Task[P, R]",
-        *args: P.args,
-        return_state: Literal[True] = True,
-        wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
-        **kwargs: P.kwargs,
-    ) -> State[R]: ...
+        **kwargs: Any,
+    ) -> T: ...
 
     def __call__(
-        self: "Union[Task[P, R], Task[P, NoReturn]]",
-        *args: P.args,
+        self: "Union[Task[..., T], Task[..., NoReturn]]",
+        *args: Any,
         return_state: bool = False,
         wait_for: Optional[OneOrManyFutureOrResult[Any]] = None,
-        **kwargs: P.kwargs,
-    ) -> Union[R, State[R], None]:
+        **kwargs: Any,
+    ) -> Union[T, State[T], None]:
         """
         Run the task and return the result. If `return_state` is True returns
         the result is wrapped in a Prefect State which provides error handling.
@@ -1353,6 +1404,8 @@ class Task(Generic[P, R]):
             raise VisualizationUnsupportedError(
                 "`task.submit()` is not currently supported by `flow.visualize()`"
             )
+
+        raise_if_flow_run_suspension_requested()
 
         task_runner = flow_run_context.task_runner
         future = task_runner.submit(self, parameters, wait_for)
@@ -1576,12 +1629,14 @@ class Task(Generic[P, R]):
                 "`task.map()` is not currently supported by `flow.visualize()`"
             )
 
+        raise_if_flow_run_suspension_requested()
+
         if deferred:
             parameters_list = expand_mapping_parameters(self.fn, parameters)
-            futures = [
+            futures = PrefectFutureList(
                 self.apply_async(kwargs=parameters, wait_for=wait_for)
                 for parameters in parameters_list
-            ]
+            )
         elif task_runner := getattr(flow_run_context, "task_runner", None):
             assert isinstance(task_runner, TaskRunner)
             futures = task_runner.map(self, parameters, wait_for)
@@ -1692,6 +1747,8 @@ class Task(Generic[P, R]):
         # Convert the call args/kwargs to a parameter dict
         parameters = get_call_parameters(self.fn, args, kwargs)
 
+        raise_if_flow_run_suspension_requested()
+
         task_run: TaskRun = run_coro_as_sync(
             self.create_run(
                 parameters=parameters,
@@ -1765,15 +1822,32 @@ class Task(Generic[P, R]):
         """
         return self.apply_async(args=args, kwargs=kwargs)
 
-    @sync_compatible
-    async def serve(self) -> NoReturn:
+    async def aserve(self) -> NoReturn:
         """Serve the task using the provided task runner. This method is used to
         establish a websocket connection with the Prefect server and listen for
         submitted task runs to execute.
 
-        Args:
-            task_runner: The task runner to use for serving the task. If not provided,
-                the default task runner will be used.
+        This is the async version of serve().
+
+        Examples:
+            Serve a task using the default task runner in an async context
+            ```python
+            @task
+            def my_task():
+                return 1
+
+            await my_task.aserve()
+            ```
+        """
+        from prefect.task_worker import aserve
+
+        await aserve(self)
+
+    @async_dispatch(aserve)
+    def serve(self) -> NoReturn:
+        """Serve the task using the provided task runner. This method is used to
+        establish a websocket connection with the Prefect server and listen for
+        submitted task runs to execute.
 
         Examples:
             Serve a task using the default task runner
@@ -1787,7 +1861,7 @@ class Task(Generic[P, R]):
         """
         from prefect.task_worker import serve
 
-        await serve(self)
+        serve(self)
 
 
 @overload
@@ -1977,7 +2051,11 @@ def task(
             indicates that the global default should be used (which is `True` by
             default).
         result_storage: An optional block to use to persist the result of this task.
-            Defaults to the value set in the flow the task is called in.
+            This can be either a saved block instance or a string reference (e.g.,
+            "local-file-system/my-storage"). Block instances must have `.save()` called
+            first since decorators execute at import time. String references are resolved
+            at runtime and recommended for testing scenarios. Defaults to the value set
+            in the flow the task is called in.
         result_storage_key: An optional key to store the result in storage at when persisted.
             Defaults to a unique identifier.
         result_serializer: An optional serializer to use to serialize the result of this
@@ -2166,6 +2244,8 @@ class MaterializingTask(Task[P, R]):
             "on_running": "on_running_hooks",
             "on_rollback": "on_rollback_hooks",
             "on_commit": "on_commit_hooks",
+            "persist_result": "_user_persist_result",
+            "cache_policy": "_user_cache_policy",
         }
 
         # Build kwargs for Task constructor

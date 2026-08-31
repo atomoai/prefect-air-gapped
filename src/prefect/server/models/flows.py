@@ -3,7 +3,7 @@ Functions for interacting with flow ORM objects.
 Intended for internal use by the Prefect REST API.
 """
 
-from typing import Optional, Sequence, TypeVar, Union
+from typing import List, Optional, Sequence, TypeVar, Union
 from uuid import UUID
 
 import sqlalchemy as sa
@@ -13,8 +13,29 @@ from sqlalchemy.sql import Select
 
 import prefect.server.schemas as schemas
 from prefect.server.database import PrefectDBInterface, db_injector, orm_models
+from prefect.server.events import clients
+from prefect.server.events.schemas import lifecycle
+from prefect.types._datetime import now
 
 T = TypeVar("T", bound=tuple)
+
+
+async def emit_flow_created_event(flow: orm_models.Flow) -> None:
+    """Emit an event when a flow is created."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(lifecycle.flow_created_event(flow, now("UTC")))
+
+
+async def emit_flow_updated_event(flow: orm_models.Flow) -> None:
+    """Emit an event when a flow is updated."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(lifecycle.flow_updated_event(flow, now("UTC")))
+
+
+async def emit_flow_deleted_event(flow: orm_models.Flow) -> None:
+    """Emit an event when a flow is deleted."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(lifecycle.flow_deleted_event(flow, now("UTC")))
 
 
 @db_injector
@@ -41,7 +62,8 @@ async def create_flow(
             index_elements=db.orm.flow_unique_upsert_columns,
         )
     )
-    await session.execute(insert_stmt)
+    insert_result = await session.execute(insert_stmt)
+    inserted = insert_result.rowcount == 1
 
     query = (
         sa.select(db.Flow)
@@ -51,6 +73,10 @@ async def create_flow(
     )
     result = await session.execute(query)
     model = result.scalar_one()
+
+    if inserted:
+        await emit_flow_created_event(model)
+
     return model
 
 
@@ -72,6 +98,10 @@ async def update_flow(
     Returns:
         bool: whether or not matching rows were found to update
     """
+    existing = await read_flow(session, flow_id)
+    if existing is None:
+        return False
+
     update_stmt = (
         sa.update(db.Flow)
         .where(db.Flow.id == flow_id)
@@ -79,8 +109,11 @@ async def update_flow(
         # the user, ignoring any defaults on the model
         .values(**flow.model_dump_for_orm(exclude_unset=True))
     )
-    result = await session.execute(update_stmt)
-    return result.rowcount > 0
+    await session.execute(update_stmt)
+
+    await session.refresh(existing)
+    await emit_flow_updated_event(existing)
+    return True
 
 
 @db_injector
@@ -285,9 +318,58 @@ async def delete_flow(
     Returns:
         bool: whether or not the flow was deleted
     """
+    existing = await read_flow(session, flow_id)
+    if existing is None:
+        return False
 
-    result = await session.execute(delete(db.Flow).where(db.Flow.id == flow_id))
-    return result.rowcount > 0
+    await emit_flow_deleted_event(existing)
+
+    await session.execute(delete(db.Flow).where(db.Flow.id == flow_id))
+    return True
+
+
+@db_injector
+async def delete_flows(
+    db: PrefectDBInterface,
+    session: AsyncSession,
+    flow_ids: List[UUID],
+) -> List[UUID]:
+    """
+    Delete multiple flows by their IDs.
+
+    This also deletes all associated deployments (hard delete).
+
+    Args:
+        session: A database session
+        flow_ids: a list of flow ids to delete
+
+    Returns:
+        List[UUID]: the IDs of the flows that were deleted
+    """
+    if not flow_ids:
+        return []
+
+    # Get existing flows
+    result = await session.execute(select(db.Flow).where(db.Flow.id.in_(flow_ids)))
+    existing_flows = list(result.scalars().all())
+
+    if not existing_flows:
+        return []
+
+    existing_ids = [flow.id for flow in existing_flows]
+
+    for flow in existing_flows:
+        await emit_flow_deleted_event(flow)
+
+    # Delete associated deployments (hard delete - cascade will handle related data)
+    await session.execute(
+        delete(db.Deployment).where(db.Deployment.flow_id.in_(existing_ids))
+    )
+
+    # Delete the flows
+    await session.execute(delete(db.Flow).where(db.Flow.id.in_(existing_ids)))
+
+    return existing_ids
 
 
 @db_injector

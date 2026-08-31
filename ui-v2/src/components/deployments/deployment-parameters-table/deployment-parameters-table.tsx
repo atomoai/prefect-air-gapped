@@ -1,14 +1,8 @@
-import {
-	createColumnHelper,
-	getCoreRowModel,
-	getPaginationRowModel,
-	useReactTable,
-} from "@tanstack/react-table";
 import { useDeferredValue, useMemo, useState } from "react";
 import type { Deployment } from "@/api/deployments";
 import { DataTable } from "@/components/ui/data-table";
 import { SearchInput } from "@/components/ui/input";
-import { Typography } from "@/components/ui/typography";
+import { createColumnHelper, useTable } from "@/lib/tanstack-table";
 import { pluralize } from "@/utils";
 
 type DeploymentParametersTableProps = {
@@ -31,12 +25,61 @@ type ParametersTableColumns = {
 
 const columnHelper = createColumnHelper<ParametersTableColumns>();
 
-const columns = [
-	columnHelper.accessor("key", { header: "Key" }),
-	columnHelper.accessor("value", { header: "Override" }),
-	columnHelper.accessor("defaultValue", { header: "Default" }),
+/**
+ * Formats object-valued parameters as JSON while preserving existing scalar and
+ * array output.
+ */
+const formatParameterValue = (value: unknown): string => {
+	if (value === null || value === undefined) {
+		return "";
+	}
+	if (Array.isArray(value)) {
+		return value.join(",");
+	}
+	if (typeof value === "object") {
+		return JSON.stringify(value);
+	}
+	if (
+		typeof value === "string" ||
+		typeof value === "number" ||
+		typeof value === "boolean" ||
+		typeof value === "bigint"
+	) {
+		return value.toString();
+	}
+	return JSON.stringify(value) ?? "";
+};
+
+const columns = columnHelper.columns([
+	columnHelper.accessor("key", {
+		header: "Key",
+		cell: ({ row }) => (
+			<span
+				className="font-mono text-sm truncate block max-w-[200px]"
+				title={row.original.key}
+			>
+				{row.original.key}
+			</span>
+		),
+	}),
+	columnHelper.accessor("value", {
+		header: "Override",
+		cell: ({ getValue }) => (
+			<span className="whitespace-normal break-words font-mono text-sm">
+				{formatParameterValue(getValue())}
+			</span>
+		),
+	}),
+	columnHelper.accessor("defaultValue", {
+		header: "Default",
+		cell: ({ getValue }) => (
+			<span className="whitespace-normal break-words font-mono text-sm">
+				{formatParameterValue(getValue())}
+			</span>
+		),
+	}),
 	columnHelper.accessor("type", { header: "Type" }),
-];
+]);
 
 /**
  *
@@ -47,13 +90,13 @@ const useDeploymentParametersToTable = (
 	deployment: Deployment,
 ): Array<ParametersTableColumns> =>
 	useMemo(() => {
-		if (!deployment.parameter_openapi_schema) {
+		const parameterOpenApiSchema = deployment.parameter_openapi_schema
+			?.properties as Record<string, ParameterOpenApiSchema> | undefined;
+		if (!parameterOpenApiSchema) {
 			return [];
 		}
 
-		const parameterOpenApiSchema = deployment.parameter_openapi_schema
-			.properties as Record<string, ParameterOpenApiSchema>;
-		const parameters = deployment.parameters as Record<string, unknown>;
+		const parameters = (deployment.parameters ?? {}) as Record<string, unknown>;
 		return Object.keys(parameterOpenApiSchema)
 			.sort((a, b) => {
 				return (
@@ -84,12 +127,10 @@ export const DeploymentParametersTable = ({
 		return data.filter(
 			(parameter) =>
 				parameter.key.toLowerCase().includes(deferredSearch.toLowerCase()) ||
-				parameter.value
-					?.toString()
+				formatParameterValue(parameter.value)
 					.toLowerCase()
 					.includes(deferredSearch.toLowerCase()) ||
-				parameter.defaultValue
-					?.toString()
+				formatParameterValue(parameter.defaultValue)
 					.toLowerCase()
 					.includes(deferredSearch.toLowerCase()) ||
 				parameter.type
@@ -99,21 +140,20 @@ export const DeploymentParametersTable = ({
 		);
 	}, [data, deferredSearch]);
 
-	const table = useReactTable({
+	const table = useTable({
 		data: filteredData,
 
 		columns,
-		getCoreRowModel: getCoreRowModel(),
 		defaultColumn: { maxSize: 300 },
-		getPaginationRowModel: getPaginationRowModel(), //load client-side pagination code
 	});
 
 	return (
 		<div className="flex flex-col gap-4">
 			<div className="flex items-center justify-between">
-				<Typography variant="bodySmall" className="text-muted-foreground">
-					{filteredData.length} {pluralize(filteredData.length, "parameter")}
-				</Typography>
+				<p className="text-sm text-muted-foreground">
+					{filteredData.length.toLocaleString()}{" "}
+					{pluralize(filteredData.length, "parameter")}
+				</p>
 				<div className="sm:col-span-2 md:col-span-2 lg:col-span-3">
 					<SearchInput
 						className="sm:col-span-2 md:col-span-2 lg:col-span-3"

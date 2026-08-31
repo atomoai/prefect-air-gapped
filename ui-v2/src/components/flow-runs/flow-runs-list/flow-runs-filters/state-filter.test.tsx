@@ -33,6 +33,27 @@ describe("FlowRunsDataTable -- StateFilter", () => {
 		).toBeVisible();
 	});
 
+	it("includes all pending state names in All except scheduled", async () => {
+		// Setup
+		const user = userEvent.setup();
+		render(<TestStateFilter />);
+		// Test
+		await user.click(screen.getByRole("button", { name: /all run states/i }));
+		await user.click(
+			screen.getByRole("menuitem", { name: /all except scheduled/i }),
+		);
+
+		// Assert
+		expect(screen.getByRole("menuitem", { name: /submitting/i })).toBeVisible();
+		expect(
+			screen.getByRole("menuitem", { name: /infrastructurepending/i }),
+		).toBeVisible();
+		await user.keyboard("{Escape}");
+		expect(
+			screen.getByRole("button", { name: /all except scheduled/i }),
+		).toBeVisible();
+	});
+
 	it("selects All run states option", async () => {
 		// Setup
 		const user = userEvent.setup();
@@ -77,11 +98,12 @@ describe("FlowRunsDataTable -- StateFilter", () => {
 
 		await user.keyboard("{Escape}");
 
-		// Assert
-		expect(
-			screen.getByRole("button", {
-				name: /timedout crashed failed running \+ 1/i,
-			}),
-		).toBeVisible();
+		// Assert - MAX_FILTERS_DISPLAYED is 2, so we show 2 badges + "+ 3"
+		// The button contains badges and overflow count in separate elements
+		const button = screen.getByRole("button");
+		expect(button).toBeVisible();
+		expect(button).toHaveTextContent(/timedout/i);
+		expect(button).toHaveTextContent(/crashed/i);
+		expect(button).toHaveTextContent(/\+\s*3/);
 	});
 });

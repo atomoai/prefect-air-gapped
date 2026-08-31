@@ -9,9 +9,10 @@ from unittest.mock import ANY, AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
-from whenever import DateDelta, DateTimeDelta, TimeDelta, ZonedDateTime
+from whenever import ItemizedDateDelta, ItemizedDelta, TimeDelta, ZonedDateTime
 
 import prefect
+import prefect.cli.deployment as _deployment_mod
 from prefect.client.schemas.objects import Deployment, FlowRun
 from prefect.exceptions import FlowRunWaitTimeout
 from prefect.states import Completed, Failed
@@ -25,6 +26,8 @@ from prefect.types._datetime import (
 )
 from prefect.types._datetime import now as now_fn
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
+
+pytestmark = pytest.mark.clear_db
 
 
 @pytest.fixture
@@ -289,8 +292,8 @@ def test_start_in_option_invalid_input(
     [
         (
             "20 minutes",
-            "in 19 minutes" if sys.version_info < (3, 13) else "19 minutes from now",
-        ),  # difference due to different libraries used for parsing and display
+            "in 19 minutes" if sys.version_info < (3, 13) else "20 minutes from now",
+        ),
         ("5 days", "in 5 days" if sys.version_info < (3, 13) else "4 days from now"),
         (
             "3 seconds",
@@ -299,7 +302,7 @@ def test_start_in_option_invalid_input(
         (None, "now"),
         (
             "1 year and 3 months",
-            "in 1 year" if sys.version_info < (3, 13) else "1 year, 2 months from now",
+            "in 1 year" if sys.version_info < (3, 13) else "1 year, 3 months from now",
         ),
         (
             "2 weeks & 1 day",
@@ -333,12 +336,12 @@ async def test_start_in_option_displays_scheduled_start_time(
     "start_in,expected_duration",
     [
         ("10 minutes", TimeDelta(minutes=10)),
-        ("5 days", DateDelta(days=5)),
+        ("5 days", ItemizedDateDelta(days=5)),
         ("3 seconds", TimeDelta(seconds=3)),
         (None, TimeDelta(seconds=0)),
-        ("1 year and 3 months", DateDelta(years=1, months=3)),
-        ("2 weeks & 1 day", DateDelta(weeks=2, days=1)),
-        ("27 hours + 4 mins", DateTimeDelta(days=1, hours=3, minutes=4)),
+        ("1 year and 3 months", ItemizedDateDelta(years=1, months=3)),
+        ("2 weeks & 1 day", ItemizedDateDelta(weeks=2, days=1)),
+        ("27 hours + 4 mins", ItemizedDelta(days=1, hours=3, minutes=4)),
     ],
 )
 async def test_start_in_option_schedules_flow_run(
@@ -354,9 +357,7 @@ async def test_start_in_option_schedules_flow_run(
         tzinfo=ZoneInfo(frozen_now_py.tzname() or "UTC")
     )
     expected_start_time = (
-        ZonedDateTime.from_py_datetime(frozen_now_py_tz)
-        .add(expected_duration)
-        .py_datetime()
+        ZonedDateTime(frozen_now_py_tz).add(expected_duration).to_stdlib()
     )
     expected_display = to_datetime_string(in_local_tz(expected_start_time))
 
@@ -518,7 +519,7 @@ async def test_run_deployment_watch(
     expected_output: str,
     expected_code: int,
 ):
-    monkeypatch.setattr("prefect.cli.deployment.watch_flow_run", mock_watch_flow_run)
+    monkeypatch.setattr(_deployment_mod, "watch_flow_run", mock_watch_flow_run)
 
     deployment_run_with_watch_command = partial(
         invoke_and_assert,

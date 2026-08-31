@@ -67,6 +67,7 @@ class EcsServiceStack(Stack):
             type="String",
             description="ARN of existing AWS Secrets Manager secret containing Prefect API key (leave empty to create new)",
             default="",
+            no_echo=True,
         )
 
         self.prefect_api_key = CfnParameter(
@@ -85,6 +86,7 @@ class EcsServiceStack(Stack):
             type="String",
             description="ARN of existing AWS Secrets Manager secret containing Prefect auth string for self-hosted servers (leave empty to create new)",
             default="",
+            no_echo=True,
         )
 
         self.prefect_auth_string = CfnParameter(
@@ -385,6 +387,10 @@ class EcsServiceStack(Stack):
             ],
             enable_execute_command=True,  # Enable ECS Exec for debugging
             min_healthy_percent=100,  # Prevent tasks from stopping during deployments
+            circuit_breaker=ecs.DeploymentCircuitBreaker(
+                enable=True,
+                rollback=True,
+            ),
         )
 
         CfnOutput(
@@ -573,8 +579,12 @@ class EcsServiceStack(Stack):
             role_name=f"{self.work_pool_name.value_as_string}-task-execution-role",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
             managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name(
-                    "service-role/AmazonECSTaskExecutionRolePolicy"
+                iam.ManagedPolicy.from_managed_policy_arn(
+                    self,
+                    "AmazonECSTaskExecutionRolePolicy",
+                    Fn.sub(
+                        "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+                    ),
                 )
             ],
         )
@@ -699,7 +709,7 @@ class EcsServiceStack(Stack):
         CfnOutput(
             self,
             "PrefectApiKeySecretArnOutput",
-            value=self.get_api_key_secret_arn(),
+            value=self.api_key_secret.secret_arn,
             description="ARN of the Prefect API key secret",
             condition=self.create_new_api_key_secret_condition,
         )
@@ -707,7 +717,7 @@ class EcsServiceStack(Stack):
         CfnOutput(
             self,
             "PrefectAuthStringSecretArnOutput",
-            value=self.get_auth_string_secret_arn(),
+            value=self.auth_string_secret.secret_arn,
             description="ARN of the Prefect auth string secret",
             condition=self.create_new_auth_string_secret_condition,
         )

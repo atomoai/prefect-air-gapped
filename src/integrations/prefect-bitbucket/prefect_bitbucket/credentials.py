@@ -3,7 +3,7 @@
 import re
 from enum import Enum
 from typing import Optional, Union
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import quote, urlparse, urlunparse
 
 from pydantic import Field, SecretStr, field_validator
 
@@ -13,6 +13,15 @@ try:
     from atlassian.bitbucket import Bitbucket, Cloud
 except ImportError:
     pass
+
+
+def _quote_credential(value: str) -> str:
+    """URL-encode a credential value for use in git URLs.
+
+    Uses safe='' to encode ALL special characters including forward slashes,
+    which is required for tokens that may contain base64 characters (+, /, =).
+    """
+    return quote(value, safe="")
 
 
 class ClientType(Enum):
@@ -88,6 +97,8 @@ class BitBucketCredentials(CredentialsBlock):
         BitBucket has different authentication formats:
         - BitBucket Server: username:token format required
         - BitBucket Cloud: x-token-auth:token prefix
+        - Self-hosted instances: If username is provided, username:token format is used
+          regardless of hostname (supports instances without 'bitbucketserver' in URL)
 
         Args:
             url: Repository URL (e.g., "https://bitbucket.org/org/repo.git")
@@ -118,13 +129,24 @@ class BitBucketCredentials(CredentialsBlock):
                 raise ValueError(
                     "Username is required for BitBucket Server authentication"
                 )
-            credentials = f"{self.username}:{token_value}"
+            credentials = (
+                f"{_quote_credential(self.username)}:{_quote_credential(token_value)}"
+            )
+        # If username is provided, use username:password auth
+        # This supports self-hosted BitBucket Server instances that don't have
+        # 'bitbucketserver' in their hostname
+        elif self.username:
+            credentials = (
+                f"{_quote_credential(self.username)}:{_quote_credential(token_value)}"
+            )
         # BitBucket Cloud uses x-token-auth: prefix
         # If token already has a colon or prefix, use as-is
         elif ":" in token_value:
-            credentials = token_value
+            # Split and encode each part separately
+            parts = token_value.split(":", 1)
+            credentials = f"{_quote_credential(parts[0])}:{_quote_credential(parts[1])}"
         else:
-            credentials = f"x-token-auth:{token_value}"
+            credentials = f"x-token-auth:{_quote_credential(token_value)}"
 
         # Insert credentials into URL
         return urlunparse(parsed._replace(netloc=f"{credentials}@{parsed.netloc}"))

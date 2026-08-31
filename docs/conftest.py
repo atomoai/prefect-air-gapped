@@ -27,6 +27,10 @@ SKIP_FILES = {
     "docs/integrations/prefect-dask/usage_guide.mdx": "Attempts to start a dask cluster",
     "docs/integrations/prefect-databricks/index.mdx": "Pydantic failures",
     "docs/integrations/prefect-dbt/index.mdx": "Needs block cleanup handling, and prefect-dbt installed",
+    "docs/integrations/prefect-dbt/dbt-cloud.mdx": "Needs a DbtCloudCredentials block configured",
+    "docs/integrations/prefect-dbt/legacy.mdx": "Needs prefect-dbt installed with a dbt project and profiles",
+    "docs/integrations/prefect-dbt/runner.mdx": "Needs prefect-dbt installed with a dbt project and profiles",
+    "docs/integrations/prefect-dbt/orchestrator.mdx": "Needs prefect-dbt installed with a dbt project and profiles",
     "docs/integrations/prefect-email/index.mdx": "Needs block cleanup handling",
     "docs/integrations/prefect-gcp/index.mdx": "Needs block cleanup handling",
     "docs/integrations/prefect-github/index.mdx": "Needs block cleanup handling",
@@ -50,6 +54,7 @@ SKIP_FILES = {
     "docs/v3/develop/write-flows.mdx": "Needs Debugging in CI",
     # --- Below this line are files that need a release of a new Prefect integration ---
     "docs/v3/advanced/submit-flows-directly-to-dynamic-infrastructure.mdx": "Needs a release of prefect-docker",
+    "docs/AGENTS.md": "Not a documentation page; contains raw code examples for agent guidance",
 }
 
 
@@ -67,6 +72,13 @@ def pytest_collection_modifyitems(items):
         if "api-ref/python/" in str(item.fspath):
             item.add_marker(
                 pytest.mark.skip(reason="Skipping API reference Python files")
+            )
+            continue
+
+        # Skip generated API reference files for integrations
+        if "/integrations/" in str(item.fspath) and "/api-ref/" in str(item.fspath):
+            item.add_marker(
+                pytest.mark.skip(reason="Skipping generated API reference files")
             )
             continue
 

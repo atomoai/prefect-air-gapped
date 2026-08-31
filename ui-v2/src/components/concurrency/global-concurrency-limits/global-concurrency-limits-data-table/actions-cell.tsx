@@ -1,4 +1,3 @@
-import type { CellContext } from "@tanstack/react-table";
 import { toast } from "sonner";
 import type { GlobalConcurrencyLimit } from "@/api/global-concurrency-limits";
 import { Button } from "@/components/ui/button";
@@ -10,15 +9,18 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Icon } from "@/components/ui/icons";
+import type { CellContext } from "@/lib/tanstack-table";
 
 type ActionsCellProps = CellContext<GlobalConcurrencyLimit, unknown> & {
 	onEditRow: (row: GlobalConcurrencyLimit) => void;
 	onDeleteRow: (row: GlobalConcurrencyLimit) => void;
+	onResetRow: (row: GlobalConcurrencyLimit) => void;
 };
 
 export const ActionsCell = ({
 	onEditRow,
 	onDeleteRow,
+	onResetRow,
 	...props
 }: ActionsCellProps) => {
 	const handleCopyId = (id: string) => {
@@ -41,10 +43,16 @@ export const ActionsCell = ({
 				<DropdownMenuItem onClick={() => handleCopyId(row.id)}>
 					Copy ID
 				</DropdownMenuItem>
-				<DropdownMenuItem onClick={() => onDeleteRow(row)}>
+				<DropdownMenuItem
+					variant="destructive"
+					onClick={() => onDeleteRow(row)}
+				>
 					Delete
 				</DropdownMenuItem>
 				<DropdownMenuItem onClick={() => onEditRow(row)}>Edit</DropdownMenuItem>
+				<DropdownMenuItem onClick={() => onResetRow(row)}>
+					Reset
+				</DropdownMenuItem>
 			</DropdownMenuContent>
 		</DropdownMenu>
 	);

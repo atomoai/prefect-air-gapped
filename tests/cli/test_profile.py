@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -6,7 +7,7 @@ import pytest
 import respx
 from httpx import Response
 
-from prefect.cli.profile import show_profile_changes
+from prefect.cli.profile import show_profile_changes  # re-exported alias
 from prefect.client.cloud import CloudUnauthorizedError
 from prefect.context import use_profile
 from prefect.settings import (
@@ -303,6 +304,58 @@ def test_ls_respects_current_from_context():
                 "* bar",
             ),
         )
+
+
+def test_ls_with_json_output():
+    save_profiles(
+        ProfilesCollection(
+            profiles=[
+                Profile(name="foo", settings={}),
+                Profile(name="bar", settings={}),
+            ],
+            active=None,
+        )
+    )
+
+    with use_profile("bar"):
+        result = invoke_and_assert(
+            ["profile", "ls", "--output", "json"],
+            expected_code=0,
+        )
+
+    payload = json.loads(result.stdout)
+    assert payload == [
+        {"name": "foo", "active": False},
+        {"name": "bar", "active": True},
+    ]
+
+
+def test_ls_with_json_output_short_flag():
+    save_profiles(
+        ProfilesCollection(
+            profiles=[
+                Profile(name="foo", settings={}),
+            ],
+            active=None,
+        )
+    )
+
+    with use_profile("foo"):
+        result = invoke_and_assert(
+            ["profile", "ls", "-o", "json"],
+            expected_code=0,
+        )
+
+    payload = json.loads(result.stdout)
+    assert payload == [{"name": "foo", "active": True}]
+
+
+def test_ls_invalid_output_format():
+    invoke_and_assert(
+        ["profile", "ls", "--output", "xml"],
+        expected_code=1,
+        expected_output="Only 'json' output format is supported.",
+    )
 
 
 def test_create_profile():
@@ -642,6 +695,38 @@ def test_inspect_profile_with_json_output():
     assert (
         output_data["PREFECT_DEBUG_MODE"] == "True"
     )  # Settings are serialized as strings
+
+
+def test_inspect_active_profile_with_json_output():
+    """Regression: `profile inspect --output json` without a name must emit
+    valid JSON (no human-readable fallback line before the payload)."""
+    save_profiles(
+        ProfilesCollection(
+            profiles=[
+                Profile(
+                    name="active-json-test",
+                    settings={
+                        PREFECT_API_URL: "https://active.prefect.cloud/api",
+                        PREFECT_DEBUG_MODE: True,
+                    },
+                )
+            ],
+            active="active-json-test",
+        )
+    )
+
+    with use_profile("active-json-test"):
+        result = invoke_and_assert(
+            ["profile", "inspect", "--output", "json"],
+            expected_code=0,
+        )
+
+    output_data = json.loads(result.stdout.strip())
+
+    assert output_data == {
+        "PREFECT_API_URL": "https://active.prefect.cloud/api",
+        "PREFECT_DEBUG_MODE": "True",
+    }
 
 
 class TestProfilesPopulateDefaults:

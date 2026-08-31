@@ -14,6 +14,7 @@ import warnings
 from collections.abc import AsyncGenerator, Generator, Mapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar, Token
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -30,6 +31,7 @@ from typing_extensions import Self
 
 import prefect.settings
 import prefect.types._datetime
+from prefect._flow_run_suspension import FlowRunSuspensionRequest
 from prefect._internal.compatibility.migration import getattr_migration
 from prefect.assets import Asset
 from prefect.client.orchestration import PrefectClient, SyncPrefectClient, get_client
@@ -37,6 +39,7 @@ from prefect.client.schemas import FlowRun, TaskRun
 from prefect.client.schemas.objects import RunType
 from prefect.events.worker import EventsWorker
 from prefect.exceptions import MissingContextError
+from prefect.logging.configuration import ensure_logging_setup
 from prefect.results import (
     ResultStore,
     get_default_persist_setting,
@@ -44,11 +47,13 @@ from prefect.results import (
 )
 from prefect.settings import Profile, Settings
 from prefect.settings.legacy import (
+    Setting,
     _get_settings_fields,  # type: ignore[reportPrivateUsage]
 )
 from prefect.states import State
 from prefect.task_runners import TaskRunner
 from prefect.types import DateTime
+from prefect.utilities.collections import visit_collection
 from prefect.utilities.services import start_client_metrics_server
 
 T = TypeVar("T")
@@ -58,6 +63,53 @@ R = TypeVar("R")
 if TYPE_CHECKING:
     from prefect.flows import Flow
     from prefect.tasks import Task
+
+
+class _ContextWrappedCallable:
+    """Picklable callable that hydrates Prefect context before calling the
+    wrapped function.  The serialized context is stored as cloudpickle
+    bytes so that standard pickle (used by `multiprocessing`) can handle it."""
+
+    def __init__(
+        self, fn: Callable[..., Any], serialized_context: dict[str, Any]
+    ) -> None:
+        import cloudpickle
+
+        self.fn = fn
+        self._ctx_bytes = cloudpickle.dumps(serialized_context)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        import cloudpickle
+
+        ctx = cloudpickle.loads(self._ctx_bytes)
+        with hydrated_context(ctx):
+            return self.fn(*args, **kwargs)
+
+
+def with_context(fn: Callable[..., Any]) -> _ContextWrappedCallable:
+    """Wrap a function so it runs with the current Prefect context when
+    called in a subprocess.
+
+    Use this to enable `get_run_logger()` and other context-dependent
+    APIs in functions executed via `multiprocessing.Pool`,
+    `ProcessPoolExecutor`, or `multiprocessing.Process`.
+
+    Example:
+        ```python
+        from prefect.context import with_context
+
+        def worker(item):
+            logger = get_run_logger()
+            logger.info(f"Processing {item}")
+
+        @task
+        def my_task():
+            with multiprocessing.Pool() as pool:
+                pool.map(with_context(worker), items)
+        ```
+    """
+    ctx = serialize_context()
+    return _ContextWrappedCallable(fn, ctx)
 
 
 def serialize_context(
@@ -75,6 +127,10 @@ def serialize_context(
     tags_context = TagsContext.get()
     settings_context = SettingsContext.get()
 
+    # Serialize deployment ContextVars for cross-process context propagation
+    deployment_id = _deployment_id.get()
+    deployment_params = _deployment_parameters.get()
+
     return {
         "flow_run_context": flow_run_context.serialize() if flow_run_context else {},
         "task_run_context": task_run_context.serialize() if task_run_context else {},
@@ -85,6 +141,8 @@ def serialize_context(
         ).serialize()
         if asset_ctx_kwargs
         else {},
+        "deployment_id": str(deployment_id) if deployment_id else None,
+        "deployment_parameters": deployment_params,
     }
 
 
@@ -96,7 +154,7 @@ def hydrated_context(
     # We need to rebuild the models because we might be hydrating in a remote
     # environment where the models are not available.
     # TODO: Remove this once we have fixed our circular imports and we don't need to rebuild models any more.
-    from prefect._result_records import ResultRecordMetadata
+    from prefect._internal.result_records import ResultRecordMetadata
     from prefect.flows import Flow
     from prefect.tasks import Task
 
@@ -110,6 +168,8 @@ def hydrated_context(
 
     with ExitStack() as stack:
         if serialized_context:
+            ensure_logging_setup()
+
             # Set up settings context
             if settings_context := serialized_context.get("settings_context"):
                 stack.enter_context(SettingsContext(**settings_context))
@@ -138,6 +198,15 @@ def hydrated_context(
             # Set up asset context
             if asset_context := serialized_context.get("asset_context"):
                 stack.enter_context(AssetContext(**asset_context))
+            # Restore deployment ContextVars for cross-process context propagation
+            if deployment_id_str := serialized_context.get("deployment_id"):
+                from uuid import UUID
+
+                deployment_id_token = _deployment_id.set(UUID(deployment_id_str))
+                stack.callback(_deployment_id.reset, deployment_id_token)
+            if deployment_params := serialized_context.get("deployment_parameters"):
+                deployment_params_token = _deployment_parameters.set(deployment_params)
+                stack.callback(_deployment_parameters.reset, deployment_params_token)
         yield
 
 
@@ -246,7 +315,12 @@ class SyncClientContext(ContextModel):
         self._context_stack += 1
         if self._context_stack == 1:
             self.client.__enter__()
-            self.client.raise_for_api_version_mismatch()
+            settings_ctx = SettingsContext.get()
+            if (
+                settings_ctx is None
+                or settings_ctx.settings.client.server_version_check_enabled
+            ):
+                self.client.raise_for_api_version_mismatch_once()
             return super().__enter__()
         else:
             return self
@@ -304,7 +378,12 @@ class AsyncClientContext(ContextModel):
         self._context_stack += 1
         if self._context_stack == 1:
             await self.client.__aenter__()
-            await self.client.raise_for_api_version_mismatch()
+            settings_ctx = SettingsContext.get()
+            if (
+                settings_ctx is None
+                or settings_ctx.settings.client.server_version_check_enabled
+            ):
+                await self.client.raise_for_api_version_mismatch_once()
             return super().__enter__()
         else:
             return self
@@ -395,10 +474,24 @@ class EngineContext(RunContext):
     # Counter for flow pauses
     observed_flow_pauses: dict[str, int] = Field(default_factory=dict)
 
+    # In-process suspension request used to stop execution at orchestration
+    # boundaries with the server-accepted Suspended state.
+    flow_run_suspension_request: FlowRunSuspensionRequest = Field(
+        default_factory=FlowRunSuspensionRequest,
+        exclude=True,
+    )
+
     # Tracking for result from task runs and sub flows in this flow run for
-    # dependency tracking. Holds the ID of the object returned by
-    # the run and state
-    run_results: dict[int, tuple[State, RunType]] = Field(default_factory=dict)
+    # dependency tracking. Keyed by `id(obj)` of the result object. The
+    # third tuple element is `Optional[weakref.ReferenceType]` — a weak
+    # reference back to the object that registered the entry, used by
+    # `get_state_for_result` to verify identity at lookup time and reject
+    # stale hits caused by CPython recycling a freed memory address. The
+    # weakref is `None` for objects that don't support `__weakref__`
+    # (plain `dict`, `list`, `set`, `str`, `int`, `tuple`, ...) — for
+    # those, the legacy `id()`-only lookup is preserved as a known
+    # limitation tracked in #20558.
+    run_results: dict[int, tuple[State, RunType, Any]] = Field(default_factory=dict)
 
     # Tracking information needed to track asset linage between
     # tasks and materialization
@@ -588,17 +681,21 @@ class AssetContext(ContextModel):
         if asset.properties:
             properties_dict = asset.properties.model_dump(exclude_unset=True)
 
-            if "name" in properties_dict:
-                resource["prefect.resource.name"] = properties_dict["name"]
+            name = properties_dict.get("name")
+            if name is not None:
+                resource["prefect.resource.name"] = name
 
-            if "description" in properties_dict:
-                resource["prefect.asset.description"] = properties_dict["description"]
+            description = properties_dict.get("description")
+            if description is not None:
+                resource["prefect.asset.description"] = description
 
-            if "url" in properties_dict:
-                resource["prefect.asset.url"] = properties_dict["url"]
+            url = properties_dict.get("url")
+            if url is not None:
+                resource["prefect.asset.url"] = url
 
-            if "owners" in properties_dict:
-                resource["prefect.asset.owners"] = json.dumps(properties_dict["owners"])
+            owners = properties_dict.get("owners")
+            if owners is not None:
+                resource["prefect.asset.owners"] = json.dumps(owners)
 
         return resource
 
@@ -731,6 +828,21 @@ class SettingsContext(ContextModel):
     def __hash__(self: Self) -> int:
         return hash(self.settings)
 
+    def serialize(self, include_secrets: bool = True) -> dict[str, Any]:
+        """Serialize settings without platform-specific path objects."""
+        serialized = super().serialize(include_secrets=include_secrets)
+        return visit_collection(
+            serialized,
+            visit_fn=lambda value: (
+                value.name
+                if isinstance(value, Setting)
+                else str(value)
+                if isinstance(value, Path)
+                else value
+            ),
+            return_data=True,
+        )
+
     @classmethod
     def get(cls) -> Optional["SettingsContext"]:
         # Return the global context instead of `None` if no context exists
@@ -741,6 +853,13 @@ class SettingsContext(ContextModel):
             # it profiles need to be loaded, and that process calls
             # SettingsContext.get().
             return None
+
+
+# Root deployment context vars for O(1) access in nested flows
+_deployment_id: ContextVar[UUID | None] = ContextVar("deployment_id", default=None)
+_deployment_parameters: ContextVar[dict[str, Any] | None] = ContextVar(
+    "deployment_parameters", default=None
+)
 
 
 def get_run_context() -> Union[FlowRunContext, TaskRunContext]:
@@ -754,10 +873,23 @@ def get_run_context() -> Union[FlowRunContext, TaskRunContext]:
         RuntimeError: If called outside of a flow or task run.
     """
     task_run_ctx = TaskRunContext.get()
+    flow_run_ctx = FlowRunContext.get()
+
+    # When both contexts exist, determine which represents the currently executing code.
+    # If the flow_run_id from the flow context differs from the task's flow_run_id,
+    # we're in a subflow running inside a task, so prefer the flow context.
+    # Otherwise, we're in a regular task within the flow, so prefer the task context.
+    if task_run_ctx and flow_run_ctx:
+        if (
+            flow_run_ctx.flow_run
+            and flow_run_ctx.flow_run.id != task_run_ctx.task_run.flow_run_id
+        ):
+            return flow_run_ctx
+        return task_run_ctx
+
     if task_run_ctx:
         return task_run_ctx
 
-    flow_run_ctx = FlowRunContext.get()
     if flow_run_ctx:
         return flow_run_ctx
 
@@ -862,7 +994,7 @@ def use_profile(
 
     Args:
         profile: The name of the profile to load or an instance of a Profile.
-        override_environment_variable: If set, variables in the profile will take
+        override_environment_variables: If set, variables in the profile will take
             precedence over current environment variables. By default, environment
             variables will override profile settings.
         include_current_context: If set, the new settings will be constructed
@@ -953,6 +1085,17 @@ def root_settings_context() -> SettingsContext:
 
 
 GLOBAL_SETTINGS_CONTEXT: SettingsContext = root_settings_context()
+
+
+def refresh_global_settings_context() -> None:
+    """
+    Refresh the global settings context to pick up environment variable changes.
+
+    This is called after plugins run to ensure any environment variables they set
+    are reflected in get_current_settings().
+    """
+    global GLOBAL_SETTINGS_CONTEXT
+    GLOBAL_SETTINGS_CONTEXT = root_settings_context()
 
 
 # 2024-07-02: This surfaces an actionable error message for removed objects

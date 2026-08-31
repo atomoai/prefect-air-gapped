@@ -1,11 +1,8 @@
 import type { CheckedState } from "@radix-ui/react-checkbox";
-import {
-	createColumnHelper,
-	getCoreRowModel,
-	type OnChangeFn,
-	type PaginationState,
-	type RowSelectionState,
-	useReactTable,
+import type {
+	OnChangeFn,
+	PaginationState,
+	RowSelectionState,
 } from "@tanstack/react-table";
 import { useCallback } from "react";
 import type { BlockDocument } from "@/api/block-documents";
@@ -14,6 +11,7 @@ import { useDeleteBlockDocumentConfirmationDialog } from "@/components/blocks/us
 import { Checkbox } from "@/components/ui/checkbox";
 import { DataTable } from "@/components/ui/data-table";
 import { DeleteConfirmationDialog } from "@/components/ui/delete-confirmation-dialog";
+import { createColumnHelper, useTable } from "@/lib/tanstack-table";
 import { BlockDocumentCell } from "./block-document-cell";
 
 const columnHelper = createColumnHelper<BlockDocument>();
@@ -24,11 +22,11 @@ const createColumns = ({
 	onDelete: (blockDocument: BlockDocument) => void;
 }) => [
 	columnHelper.display({
-		size: 20,
+		maxSize: 10,
 		id: "select",
 		header: ({ table }) => {
 			let checkedState: CheckedState = false;
-			if (table.getIsAllRowsSelected()) {
+			if (table.getIsAllPageRowsSelected()) {
 				checkedState = true;
 			} else if (table.getIsSomePageRowsSelected()) {
 				checkedState = "indeterminate";
@@ -95,22 +93,17 @@ export const BlockDocumentsDataTable = ({
 
 	const handlePaginationChange: OnChangeFn<PaginationState> = useCallback(
 		(updater) => {
-			let newPagination = pagination;
-			if (typeof updater === "function") {
-				newPagination = updater(pagination);
-			} else {
-				newPagination = updater;
-			}
+			const newPagination =
+				typeof updater === "function" ? updater(pagination) : updater;
 			onPaginationChange(newPagination);
 		},
 		[pagination, onPaginationChange],
 	);
 
-	const table = useReactTable({
+	const table = useTable({
 		columns: createColumns({ onDelete: handleConfirmDelete }),
 		data: blockDocuments,
 		defaultColumn: { maxSize: 300 },
-		getCoreRowModel: getCoreRowModel(),
 		manualPagination: true,
 		onPaginationChange: handlePaginationChange,
 		rowCount: blockDocumentsCount,

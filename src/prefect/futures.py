@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import concurrent.futures
 import threading
+import time
 import uuid
 import warnings
 from collections.abc import Generator, Iterator
@@ -11,7 +13,9 @@ from typing import TYPE_CHECKING, Any, Callable, Generic
 
 from typing_extensions import NamedTuple, Self, TypeVar
 
-from prefect._waiters import FlowRunWaiter
+from prefect._flow_run_suspension import raise_if_flow_run_suspension_requested
+from prefect._internal.concurrency.cancellation import CancelledError
+from prefect._internal.waiters import FlowRunWaiter
 from prefect.client.orchestration import get_client
 from prefect.exceptions import ObjectNotFound
 from prefect.logging.loggers import get_logger
@@ -29,6 +33,14 @@ if TYPE_CHECKING:
     import logging
 
 logger: "logging.Logger" = get_logger(__name__)
+
+
+class _WaitTimeoutError(TimeoutError):
+    """Raised when Prefect's own waiting on futures times out.
+
+    Distinguishes a timeout produced by Prefect from a `TimeoutError` raised by
+    user code inside a task, which must be surfaced unchanged.
+    """
 
 
 class PrefectFuture(abc.ABC, Generic[R]):
@@ -192,13 +204,53 @@ class PrefectConcurrentFuture(PrefectWrappedFuture[R, concurrent.futures.Future[
     when the task run is submitted to a ThreadPoolExecutor.
     """
 
+    def __init__(
+        self,
+        task_run_id: uuid.UUID,
+        wrapped_future: concurrent.futures.Future[R],
+    ):
+        super().__init__(task_run_id, wrapped_future)
+        self._prefect_done_callbacks: list[Callable[[PrefectFuture[R]], None]] = []
+        self._prefect_done_callbacks_lock = threading.Lock()
+        self._prefect_done_event = threading.Event()
+
+        # Register Prefect's internal completion notifier before any user callbacks
+        # so wait()/as_completed() do not depend on callback chain ordering.
+        self._wrapped_future.add_done_callback(self._notify_prefect_done_callbacks)
+
+    def _add_prefect_done_callback(
+        self, fn: Callable[[PrefectFuture[R]], None]
+    ) -> None:
+        with self._prefect_done_callbacks_lock:
+            if self._prefect_done_event.is_set():
+                call_immediately = True
+            else:
+                self._prefect_done_callbacks.append(fn)
+                call_immediately = False
+
+        if call_immediately:
+            fn(self)
+
+    def _notify_prefect_done_callbacks(
+        self, future: concurrent.futures.Future[R]
+    ) -> None:
+        with self._prefect_done_callbacks_lock:
+            self._prefect_done_event.set()
+            callbacks = self._prefect_done_callbacks[:]
+            self._prefect_done_callbacks.clear()
+
+        for callback in callbacks:
+            callback(self)
+
     def wait(self, timeout: float | None = None) -> None:
         try:
             result = self._wrapped_future.result(timeout=timeout)
         except concurrent.futures.TimeoutError:
+            raise_if_flow_run_suspension_requested()
             return
         if isinstance(result, State):
             self._final_state = result
+        raise_if_flow_run_suspension_requested()
 
     def result(
         self,
@@ -209,6 +261,7 @@ class PrefectConcurrentFuture(PrefectWrappedFuture[R, concurrent.futures.Future[
             try:
                 future_result = self._wrapped_future.result(timeout=timeout)
             except concurrent.futures.TimeoutError as exc:
+                raise_if_flow_run_suspension_requested()
                 raise TimeoutError(
                     f"Task run {self.task_run_id} did not complete within {timeout} seconds"
                 ) from exc
@@ -217,8 +270,10 @@ class PrefectConcurrentFuture(PrefectWrappedFuture[R, concurrent.futures.Future[
                 self._final_state = future_result
 
             else:
+                raise_if_flow_run_suspension_requested()
                 return future_result
 
+        raise_if_flow_run_suspension_requested()
         _result = self._final_state.result(
             raise_on_failure=raise_on_failure, _sync=True
         )
@@ -245,6 +300,7 @@ class PrefectDistributedFuture(PrefectTaskRunFuture[R]):
             logger.debug(
                 "Final state already set for %s. Returning...", self.task_run_id
             )
+            raise_if_flow_run_suspension_requested()
             return
 
         # Ask for the instance of TaskRunWaiter _now_ so that it's already running and
@@ -264,6 +320,7 @@ class PrefectDistributedFuture(PrefectTaskRunFuture[R]):
                     self.task_run_id,
                 )
                 self._final_state = task_run.state
+                raise_if_flow_run_suspension_requested()
                 return
 
             # If still running, wait for a completed event from the server
@@ -283,6 +340,7 @@ class PrefectDistributedFuture(PrefectTaskRunFuture[R]):
                     self.task_run_id,
                     state_from_event.type,
                 )
+            raise_if_flow_run_suspension_requested()
             return
 
     def result(
@@ -309,10 +367,12 @@ class PrefectDistributedFuture(PrefectTaskRunFuture[R]):
                     if task_run.state and task_run.state.is_final():
                         self._final_state = task_run.state
                     else:
+                        raise_if_flow_run_suspension_requested()
                         raise TimeoutError(
                             f"Task run {self.task_run_id} did not complete within {timeout} seconds"
                         )
 
+        raise_if_flow_run_suspension_requested()
         return await self._final_state.aresult(raise_on_failure=raise_on_failure)
 
     def add_done_callback(self, fn: Callable[[PrefectFuture[R]], None]) -> None:
@@ -373,8 +433,9 @@ class PrefectFlowRunFuture(PrefectFuture[R]):
     async def wait_async(self, timeout: float | None = None) -> None:
         if self._final_state:
             logger.debug(
-                "Final state already set for %s. Returning...", self.task_run_id
+                "Final state already set for %s. Returning...", self.flow_run_id
             )
+            raise_if_flow_run_suspension_requested()
             return
 
         # Ask for the instance of FlowRunWaiter _now_ so that it's already running and
@@ -394,6 +455,7 @@ class PrefectFlowRunFuture(PrefectFuture[R]):
                     self.flow_run_id,
                 )
                 self._final_state = flow_run.state
+                raise_if_flow_run_suspension_requested()
                 return
 
             # If still running, wait for a completed event from the server
@@ -401,11 +463,25 @@ class PrefectFlowRunFuture(PrefectFuture[R]):
                 "Waiting for completed event for flow run %s...",
                 self.flow_run_id,
             )
+            start_time = time.monotonic()
             await FlowRunWaiter.wait_for_flow_run(self._flow_run_id, timeout=timeout)
-            flow_run = await client.read_flow_run(flow_run_id=self._flow_run_id)
-            if flow_run.state and flow_run.state.is_final():
-                self._final_state = flow_run.state
-            return
+
+            # Poll for the final state in case the event was missed due to race
+            # conditions or connection issues with the event subscriber
+            while True:
+                flow_run = await client.read_flow_run(flow_run_id=self._flow_run_id)
+                if flow_run.state and flow_run.state.is_final():
+                    self._final_state = flow_run.state
+                    raise_if_flow_run_suspension_requested()
+                    return
+                # Check if timeout has been exceeded
+                if timeout is not None:
+                    elapsed = time.monotonic() - start_time
+                    if elapsed >= timeout:
+                        raise_if_flow_run_suspension_requested()
+                        return
+                # Brief sleep before polling again to avoid hammering the API
+                await asyncio.sleep(0.1)
 
     def result(
         self,
@@ -424,10 +500,12 @@ class PrefectFlowRunFuture(PrefectFuture[R]):
         if not self._final_state:
             await self.wait_async(timeout=timeout)
             if not self._final_state:
+                raise_if_flow_run_suspension_requested()
                 raise TimeoutError(
-                    f"Task run {self.task_run_id} did not complete within {timeout} seconds"
+                    f"Flow run {self.flow_run_id} did not complete within {timeout} seconds"
                 )
 
+        raise_if_flow_run_suspension_requested()
         return await self._final_state.aresult(raise_on_failure=raise_on_failure)
 
     def add_done_callback(self, fn: Callable[[PrefectFuture[R]], None]) -> None:
@@ -478,39 +556,89 @@ class PrefectFutureList(list[PrefectFuture[R]], Iterator[PrefectFuture[R]]):
         """
         Get the results of all task runs associated with the futures in the list.
 
+        Uses `as_completed` internally so that failures are raised as soon as
+        they occur rather than waiting for earlier, still-running futures to
+        finish first.
+
         Args:
             timeout: The maximum number of seconds to wait for all futures to
                 complete.
             raise_on_failure: If `True`, an exception will be raised if any task run fails.
 
         Returns:
-            A list of results of the task runs.
+            A list of results of the task runs, in the same order as the
+            futures in the list.
 
         Raises:
             TimeoutError: If the timeout is reached before all futures complete.
         """
+        # Build a mapping from each unique future to every index it occupies
+        # so that we can handle duplicates and preserve ordering.
+        if timeout is not None and timeout < 0:
+            raise ValueError(f"'timeout' must be a non-negative number, got {timeout}")
+        future_to_indices: dict[PrefectFuture[R], list[int]] = {}
+        for idx, future in enumerate(self):
+            future_to_indices.setdefault(future, []).append(idx)
+
+        results: list[R] = [None] * len(self)  # type: ignore[list-item]
+        timeout_message = (
+            f"Timed out waiting for all futures to complete within {timeout} seconds"
+        )
+        deadline = time.monotonic() + timeout if timeout is not None else None
+
         try:
-            with timeout_context(timeout):
-                return [
-                    future.result(raise_on_failure=raise_on_failure) for future in self
-                ]
-        except TimeoutError as exc:
-            # timeout came from inside the task
-            if "Scope timed out after {timeout} second(s)." not in str(exc):
+            # `as_completed` de-duplicates internally; each unique future is
+            # yielded exactly once, in completion order. Its timeout scope stays
+            # entered while the loop body runs, so slow result retrieval (e.g.
+            # large data deserialization) is bounded by the caller's timeout too.
+            for future in as_completed(list(self), timeout=timeout):
+                result = future.result(raise_on_failure=raise_on_failure)
+                for i in future_to_indices[future]:
+                    results[i] = result
+                # Retrieval can overrun the deadline without cancellation
+                # arriving, e.g. on Windows where no sync cancel scope arms.
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(timeout_message)
+        # A `TimeoutError` from inside a task is not a `_WaitTimeoutError` and
+        # propagates unchanged.
+        except _WaitTimeoutError as exc:
+            raise TimeoutError(timeout_message) from exc
+        except CancelledError as exc:
+            # Cancel scopes deliver cancellation to the frame the supervised
+            # thread is currently in. While `as_completed` is suspended at its
+            # `yield`, that frame is this one, so its `timeout_context` never
+            # sees the error and cannot convert it. Only claim the cancellation
+            # if our own deadline has passed; otherwise it belongs to an
+            # enclosing scope, such as a flow run timeout.
+            if deadline is None or time.monotonic() < deadline:
                 raise
-            raise TimeoutError(
-                f"Timed out waiting for all futures to complete within {timeout} seconds"
-            ) from exc
+            raise TimeoutError(timeout_message) from exc
+
+        return results
+
+
+def _register_prefect_done_callback(
+    future: PrefectFuture[R], callback: Callable[[PrefectFuture[R]], None]
+) -> None:
+    add_prefect_done_callback = getattr(future, "_add_prefect_done_callback", None)
+    if add_prefect_done_callback is not None:
+        add_prefect_done_callback(callback)
+        return
+
+    future.add_done_callback(callback)
 
 
 def as_completed(
     futures: list[PrefectFuture[R]], timeout: float | None = None
 ) -> Generator[PrefectFuture[R], None]:
+    if timeout is not None and timeout < 0:
+        raise ValueError(f"'timeout' must be a non-negative number, got {timeout}")
     unique_futures: set[PrefectFuture[R]] = set(futures)
     total_futures = len(unique_futures)
     pending = unique_futures
+    deadline: float | None = None
     try:
-        with timeout_context(timeout):
+        with timeout_context(timeout, timeout_exc_type=_WaitTimeoutError):
             done = {f for f in unique_futures if f._final_state}  # type: ignore[privateUsage]
             pending = unique_futures - done
             yield from done
@@ -525,10 +653,19 @@ def as_completed(
                     finished_event.set()
 
             for future in pending:
-                future.add_done_callback(add_to_done)
+                _register_prefect_done_callback(future, add_to_done)
+
+            deadline = time.monotonic() + timeout if timeout is not None else None
 
             while pending:
-                finished_event.wait()
+                if timeout is None:
+                    finished_event.wait()
+                else:
+                    assert deadline is not None
+                    remaining = deadline - time.monotonic()
+                    if not finished_event.wait(timeout=max(remaining, 0.0)):
+                        raise _WaitTimeoutError
+
                 with finished_lock:
                     done = finished_futures
                     finished_futures = []
@@ -538,8 +675,8 @@ def as_completed(
                     pending.remove(future)
                     yield future
 
-    except TimeoutError:
-        raise TimeoutError(
+    except _WaitTimeoutError:
+        raise _WaitTimeoutError(
             "%d (of %d) futures unfinished" % (len(pending), total_futures)
         )
 
@@ -587,10 +724,13 @@ def wait(
             print(f"Not Done: {len(not_done)}")
         ```
     """
+    if timeout is not None and timeout < 0:
+        raise ValueError(f"'timeout' must be a non-negative number, got {timeout}")
     _futures = set(futures)
     done = {f for f in _futures if f._final_state}
     not_done = _futures - done
     if len(done) == len(_futures):
+        raise_if_flow_run_suspension_requested()
         return DoneAndNotDoneFutures(done, not_done)
 
     # If no timeout, wait for all futures sequentially
@@ -599,11 +739,13 @@ def wait(
             future.wait()
             done.add(future)
             not_done.remove(future)
+        raise_if_flow_run_suspension_requested()
         return DoneAndNotDoneFutures(done, not_done)
 
     # With timeout, monitor all futures concurrently
     try:
         with timeout_context(timeout):
+            deadline = time.monotonic() + timeout
             finished_event = threading.Event()
             finished_lock = threading.Lock()
             finished_futures: list[PrefectFuture[R]] = []
@@ -615,12 +757,20 @@ def wait(
 
             # Add callbacks to all pending futures
             for future in not_done:
-                future.add_done_callback(mark_done)
+                _register_prefect_done_callback(future, mark_done)
 
             # Wait for futures to complete within timeout
             while not_done:
-                # Wait for at least one future to complete
-                finished_event.wait()
+                # Calculate remaining time until deadline
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+
+                # Wait for at least one future to complete, with timeout to respect deadline
+                # The timeout parameter ensures we don't block indefinitely even if
+                # WatcherThreadCancelScope is used (which can't interrupt blocking calls)
+                finished_event.wait(timeout=remaining)
+
                 with finished_lock:
                     newly_done = finished_futures[:]
                     finished_futures.clear()
@@ -632,9 +782,11 @@ def wait(
                         not_done.remove(future)
                         done.add(future)
 
+            raise_if_flow_run_suspension_requested()
             return DoneAndNotDoneFutures(done, not_done)
     except TimeoutError:
         logger.debug("Timed out waiting for all futures to complete.")
+        raise_if_flow_run_suspension_requested()
         return DoneAndNotDoneFutures(done, not_done)
 
 
@@ -711,12 +863,22 @@ def _resolve_futures(
         else:
             return expr
 
-    return visit_collection(
+    result = visit_collection(
         expr,
         visit_fn=replace_futures,
         return_data=True,
         context={},
     )
+
+    # visit_collection preserves collection subclass types, so a
+    # PrefectFutureList will still be a PrefectFutureList after its
+    # PrefectFuture elements are replaced with resolved values.  Downcast
+    # to a plain list so callers don't receive a PrefectFutureList whose
+    # methods (result, wait) assume the elements are PrefectFuture objects.
+    if isinstance(result, PrefectFutureList):
+        result = list(result)
+
+    return result
 
 
 def _collect_futures(

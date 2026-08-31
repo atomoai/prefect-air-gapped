@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,11 +12,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import typer
 from botocore.exceptions import ClientError
-from prefect_aws.experimental.bundles.execute import (
+from prefect_aws.bundles.execute import (
     download_bundle_from_s3,
     execute_bundle_from_s3,
 )
-from prefect_aws.experimental.bundles.upload import upload_bundle_to_s3
+from prefect_aws.bundles.upload import upload_bundle_to_s3
+
+EXECUTE_BUNDLE_MOCK_PATH = "prefect_aws.bundles.execute.execute_bundle"
 
 
 @pytest.fixture(autouse=True)
@@ -47,12 +50,8 @@ def mock_bundle_file(tmp_path: Path):
 @pytest.fixture
 def mock_aws_credentials():
     with (
-        patch(
-            "prefect_aws.experimental.bundles.upload.AwsCredentials"
-        ) as mock_creds_upload,
-        patch(
-            "prefect_aws.experimental.bundles.execute.AwsCredentials"
-        ) as mock_creds_execute,
+        patch("prefect_aws.bundles.upload.AwsCredentials") as mock_creds_upload,
+        patch("prefect_aws.bundles.execute.AwsCredentials") as mock_creds_execute,
     ):
         # Create a mock instance with an S3 client
         mock_instance = MagicMock()
@@ -166,7 +165,7 @@ class TestUploadBundle:
     @pytest.mark.usefixtures("mock_s3_client")
     def test_upload_bundle_cli(self, mock_bundle_file: Path):
         """Test upload via CLI."""
-        from prefect_aws.experimental.bundles import upload
+        from prefect_aws.bundles import upload
 
         captured_args: dict[str, Any] = {}
         original_func = upload.upload_bundle_to_s3
@@ -217,7 +216,7 @@ class TestUploadBundle:
     @pytest.mark.usefixtures("mock_s3_client", "mock_aws_credentials")
     def test_upload_bundle_cli_with_credentials(self, mock_bundle_file: Path):
         """Test upload via CLI with AWS credentials."""
-        from prefect_aws.experimental.bundles import upload
+        from prefect_aws.bundles import upload
 
         captured_args: dict[str, Any] = {}
         original_func = upload.upload_bundle_to_s3
@@ -270,7 +269,7 @@ class TestUploadBundle:
     @pytest.mark.usefixtures("mock_s3_client")
     def test_upload_bundle_cli_missing_required(self, mock_bundle_file: Path):
         """Test upload via CLI with missing required options."""
-        from prefect_aws.experimental.bundles import upload
+        from prefect_aws.bundles import upload
 
         # Missing --bucket
         old_argv = sys.argv
@@ -378,8 +377,7 @@ class TestExecuteBundle:
 
         mock_s3_client.download_file.side_effect = mock_download_file
 
-        with patch("prefect.runner.Runner.execute_bundle") as mock_execute:
-            mock_execute.return_value = None
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock) as mock_execute:
             execute_bundle_from_s3(
                 bucket="test-bucket",
                 key="test-key",
@@ -399,8 +397,7 @@ class TestExecuteBundle:
 
         s3_client.download_file.side_effect = mock_download_file
 
-        with patch("prefect.runner.Runner.execute_bundle") as mock_execute:
-            mock_execute.return_value = None
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock) as mock_execute:
             execute_bundle_from_s3(
                 bucket="test-bucket",
                 key="test-key",
@@ -429,7 +426,7 @@ class TestExecuteBundle:
     def test_execute_bundle_cli(self, mock_s3_client: MagicMock):
         """Test execution via CLI."""
         with patch("typer.run") as mock_run:
-            from prefect_aws.experimental.bundles import execute
+            from prefect_aws.bundles import execute
 
             mock_run.assert_not_called()  # Should not be called on import
 
@@ -446,7 +443,7 @@ class TestExecuteBundle:
     def test_execute_bundle_cli_with_credentials(self):
         """Test execution via CLI with AWS credentials."""
         with patch("typer.run") as mock_run:
-            from prefect_aws.experimental.bundles import execute
+            from prefect_aws.bundles import execute
 
             old_argv = sys.argv
             sys.argv = [
@@ -468,7 +465,7 @@ class TestExecuteBundle:
     @pytest.mark.usefixtures("mock_s3_client")
     def test_execute_bundle_cli_missing_required(self):
         """Test execution via CLI with missing required options."""
-        from prefect_aws.experimental.bundles import execute
+        from prefect_aws.bundles import execute
 
         # Missing --key
         old_argv = sys.argv
@@ -483,3 +480,194 @@ class TestExecuteBundle:
             assert exc_info.value.code == 2  # Typer exits with code 2 for usage errors
         finally:
             sys.argv = old_argv
+
+
+class TestExecuteBundleFromS3WithFiles:
+    """Tests for bundle execution with included files."""
+
+    def test_execute_without_files_key_unchanged(
+        self, mock_s3_client: MagicMock, mock_bundle_data: dict[str, Any]
+    ):
+        """Execution without files_key works as before (no extraction)."""
+        # Ensure mock_bundle_data has no files_key
+        assert "files_key" not in mock_bundle_data
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            Path(filename).write_text(json.dumps(mock_bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock) as mock_execute:
+            execute_bundle_from_s3(bucket="test-bucket", key="test-key")
+
+            # Should only download bundle, not files
+            assert mock_s3_client.download_file.call_count == 1
+            mock_execute.assert_called_once()
+
+    def test_execute_with_files_key_downloads_sidecar(self, mock_s3_client: MagicMock):
+        """When files_key present, sidecar zip is downloaded."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": "files/abc123.zip",
+        }
+
+        call_log: list[dict[str, str]] = []
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            call_log.append({"bucket": bucket, "key": key})
+            if key.endswith(".zip"):
+                # Create minimal valid zip
+                with zipfile.ZipFile(filename, "w") as zf:
+                    zf.writestr("test.txt", "content")
+            else:
+                Path(filename).write_text(json.dumps(bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+        # Should download both bundle AND sidecar zip
+        assert len(call_log) == 2
+        assert call_log[0]["key"] == "bundle.json"
+        assert call_log[1]["key"] == "files/abc123.zip"
+
+    def test_execute_with_files_extracts_to_cwd(
+        self,
+        mock_s3_client: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Files are extracted to working directory before execution."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": "files/abc123.zip",
+        }
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            if key.endswith(".zip"):
+                with zipfile.ZipFile(filename, "w") as zf:
+                    zf.writestr("data/config.yaml", "key: value")
+            else:
+                Path(filename).write_text(json.dumps(bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        # Change to tmp_path as working directory
+        monkeypatch.chdir(tmp_path)
+
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+        # File should be extracted to cwd
+        extracted_file = tmp_path / "data" / "config.yaml"
+        assert extracted_file.exists()
+        assert extracted_file.read_text() == "key: value"
+
+    def test_execute_with_files_cleans_up_zip(
+        self, mock_s3_client: MagicMock, tmp_path: Path
+    ):
+        """Downloaded zip file is deleted after extraction."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": "files/abc123.zip",
+        }
+
+        downloaded_zip_path: Path | None = None
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            nonlocal downloaded_zip_path
+            if key.endswith(".zip"):
+                downloaded_zip_path = Path(filename)
+                with zipfile.ZipFile(filename, "w") as zf:
+                    zf.writestr("test.txt", "content")
+            else:
+                Path(filename).write_text(json.dumps(bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+        # Zip should be deleted after extraction
+        assert downloaded_zip_path is not None
+        assert not downloaded_zip_path.exists()
+
+    def test_execute_with_files_raises_on_download_failure(
+        self, mock_s3_client: MagicMock
+    ):
+        """Clear error when sidecar zip download fails."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": "files/abc123.zip",
+        }
+
+        call_count = [0]
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: bundle download succeeds
+                Path(filename).write_text(json.dumps(bundle_data))
+            else:
+                # Second call: files download fails
+                raise ClientError(
+                    {"Error": {"Code": "NoSuchKey", "Message": "Not found"}},
+                    "download_file",
+                )
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with pytest.raises(RuntimeError, match="Failed to download"):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+    def test_execute_with_files_raises_on_corrupted_zip(
+        self, mock_s3_client: MagicMock
+    ):
+        """Clear error when sidecar zip is corrupted."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": "files/abc123.zip",
+        }
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            if key.endswith(".zip"):
+                # Write invalid zip data
+                Path(filename).write_bytes(b"not a valid zip file")
+            else:
+                Path(filename).write_text(json.dumps(bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with pytest.raises(RuntimeError, match="Failed to extract"):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+    def test_execute_with_files_key_none_no_extraction(self, mock_s3_client: MagicMock):
+        """No extraction when files_key is explicitly None."""
+        bundle_data = {
+            "function": "test_function",
+            "context": "test_context",
+            "flow_run": {"id": "test_flow_run"},
+            "files_key": None,
+        }
+
+        def mock_download_file(bucket: str, key: str, filename: str):
+            Path(filename).write_text(json.dumps(bundle_data))
+
+        mock_s3_client.download_file.side_effect = mock_download_file
+
+        with patch(EXECUTE_BUNDLE_MOCK_PATH, new_callable=AsyncMock):
+            execute_bundle_from_s3(bucket="test-bucket", key="bundle.json")
+
+        # Should only download bundle once
+        assert mock_s3_client.download_file.call_count == 1

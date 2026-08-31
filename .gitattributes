@@ -1,0 +1,7 @@
+# uv.lock is generated output, not source. A textual 3-way merge of it produces
+# meaningless conflicts (one hunk per bumped transitive version) and, worse, can
+# silently yield a lockfile that satisfies no real resolution. Marking it binary
+# makes git refuse to merge it at all: any two-sided change becomes a clean
+# conflict with our side left in the worktree, which the release script then
+# regenerates with `uv lock`. Never resolve this file by hand.
+uv.lock merge=binary linguist-generated=true

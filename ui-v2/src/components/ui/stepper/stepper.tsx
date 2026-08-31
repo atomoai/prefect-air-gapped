@@ -1,6 +1,5 @@
 import { Card } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icons";
-import { Typography } from "@/components/ui/typography";
 import { cn } from "@/utils";
 
 type StepperProps = {
@@ -84,21 +83,22 @@ const Step = ({
 			{isComplete ? (
 				<Icon
 					id="CircleCheck"
-					color={isActive ? "teal" : "grey"}
-					className="size-12"
+					className={cn(
+						"size-12",
+						isActive ? "text-primary" : "text-muted-foreground",
+					)}
 				/>
 			) : (
 				<StepIcon isActive={isActive} label={numberLabel} />
 			)}
-			<Typography
-				variant="bodyLarge"
+			<p
 				className={cn(
-					"text-gray-500 border-gray-500 whitespace-nowrap",
-					isActive && "text-teal-700 border-teal-700",
+					"text-lg text-muted-foreground border-muted-foreground whitespace-nowrap",
+					isActive && "text-primary border-primary",
 				)}
 			>
 				{name}
-			</Typography>
+			</p>
 		</button>
 	);
 };
@@ -110,19 +110,18 @@ type StepIconProps = {
 const StepIcon = ({ isActive = false, label }: StepIconProps) => (
 	<div
 		className={cn(
-			"flex items-center justify-center size-12 rounded-full border-4 text-gray-500 border-gray-500",
-			isActive && "text-teal-700 border-teal-700",
+			"flex items-center justify-center size-12 rounded-full border-4 text-muted-foreground border-muted-foreground",
+			isActive && "text-primary border-primary",
 		)}
 	>
-		<Typography
-			variant="bodyLarge"
+		<p
 			className={cn(
-				"text-gray-500 border-gray-500",
-				isActive && "text-teal-700 border-teal-700",
+				"text-lg text-muted-foreground border-muted-foreground",
+				isActive && "text-primary border-primary",
 			)}
 		>
 			{label}
-		</Typography>
+		</p>
 	</div>
 );
 

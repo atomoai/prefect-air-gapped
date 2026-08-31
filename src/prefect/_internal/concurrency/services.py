@@ -57,9 +57,12 @@ if hasattr(os, "register_at_fork"):
 class _QueueServiceBase(abc.ABC, Generic[T]):
     _instances: dict[int, Self] = {}
     _instance_lock = threading.Lock()
+    _max_queue_size: int = 0  # 0 means unbounded
 
     def __init__(self, *args: Hashable) -> None:
-        self._queue: queue.Queue[Optional[T]] = queue.Queue()
+        self._queue: queue.Queue[Optional[T]] = queue.Queue(
+            maxsize=self._max_queue_size
+        )
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._done_event: Optional[asyncio.Event] = None
         self._task: Optional[asyncio.Task[None]] = None
@@ -85,7 +88,7 @@ class _QueueServiceBase(abc.ABC, Generic[T]):
         self._loop = None
         self._done_event = None
         self._task = None
-        self._queue = queue.Queue()
+        self._queue = queue.Queue(maxsize=self._max_queue_size)
         self._lock = threading.Lock()
 
     @classmethod
@@ -345,7 +348,16 @@ class QueueService(_QueueServiceBase[T]):
                 raise RuntimeError("Cannot put items in a stopped service instance.")
 
             logger.debug("Service %r enqueuing item %r", self, item)
-            self._queue.put_nowait(self._prepare_item(item))
+            prepared = self._prepare_item(item)
+            try:
+                self._queue.put_nowait(prepared)
+            except queue.Full:
+                self._logger.warning(
+                    "Service %r queue is full (%d items), dropping item",
+                    type(self).__name__,
+                    self._queue.qsize(),
+                )
+                self._on_item_dropped(prepared)
 
     def _prepare_item(self, item: T) -> T:
         """
@@ -355,6 +367,16 @@ class QueueService(_QueueServiceBase[T]):
         The default implementation returns the item unchanged.
         """
         return item
+
+    def _on_item_dropped(self, item: T) -> None:
+        """
+        Called when a prepared item is dropped because the queue is full.
+
+        Subclasses can override this to clean up any resources allocated
+        during _prepare_item.
+
+        The default implementation is a no-op.
+        """
 
     @abc.abstractmethod
     async def _handle(self, item: T) -> None:
@@ -386,10 +408,21 @@ class FutureQueueService(
             # If the request to the increment endpoint fails in a non-standard
             # way, we need to set the future's result so it'll be re-raised in
             # the context of the caller.
-            future.set_exception(exc)
+            if future.set_running_or_notify_cancel():
+                future.set_exception(exc)
             raise exc
         else:
-            future.set_result(response)
+            # Transitioning the future to running before setting its result closes
+            # the window where the caller cancels it while `acquire` is in flight:
+            # after this point `cancel()` fails, and if the caller got there first
+            # the acquired resource is nobody's and must be discarded.
+            if future.set_running_or_notify_cancel():
+                future.set_result(response)
+            else:
+                await self._discard(response)
+
+    async def _discard(self, response: R) -> None:
+        """Dispose of a result whose caller is no longer waiting for it."""
 
     @abc.abstractmethod
     async def acquire(self, *args: Unpack[Ts]) -> R:

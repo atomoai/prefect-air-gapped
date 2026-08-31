@@ -10,7 +10,8 @@ from typing_extensions import Literal, TypeAlias
 
 from prefect.logging import get_logger
 from prefect.server.database import PrefectDBInterface, db_injector
-from prefect.server.events import filters
+from prefect.server.events import clients, filters
+from prefect.server.events.schemas import lifecycle
 from prefect.server.events.schemas.automations import (
     Automation,
     AutomationPartialUpdate,
@@ -22,6 +23,31 @@ from prefect.types._datetime import now
 from prefect.utilities.asyncutils import run_coro_as_sync
 
 logger: logging.Logger = get_logger(__name__)
+
+
+async def emit_automation_created_event(automation: Automation) -> None:
+    """Emit an event when an automation is created."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(
+            lifecycle.automation_created_event(automation, now("UTC"))
+        )
+
+
+async def emit_automation_updated_event(automation: Automation) -> None:
+    """Emit an event when an automation is updated."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(
+            lifecycle.automation_updated_event(automation, now("UTC"))
+        )
+
+
+async def emit_automation_deleted_event(automation: Automation) -> None:
+    """Emit an event when an automation is deleted."""
+    async with clients.PrefectServerEventsClient() as events_client:
+        await events_client.emit(
+            lifecycle.automation_deleted_event(automation, now("UTC"))
+        )
+
 
 AutomationChangeEvent: TypeAlias = Literal[
     "automation__created", "automation__updated", "automation__deleted"
@@ -176,6 +202,7 @@ async def create_automation(
     await _sync_automation_related_resources(session, new_automation.id, automation)
 
     await _notify(session, automation, "created")
+    await emit_automation_created_event(automation)
     return automation
 
 
@@ -220,6 +247,11 @@ async def update_automation(
         )
 
     await _notify(session, automation, "updated")
+
+    updated_automation = await read_automation(session, automation_id)
+    if updated_automation is not None:
+        await emit_automation_updated_event(updated_automation)
+
     return result.rowcount > 0  # type: ignore
 
 
@@ -233,6 +265,25 @@ async def delete_automation(
     if not automation:
         return False
 
+    # Delete child tables in a consistent order to prevent deadlocks
+    # when multiple automations are deleted concurrently
+    await session.execute(
+        sa.delete(db.AutomationBucket).where(
+            db.AutomationBucket.automation_id == automation_id,
+        )
+    )
+    await session.execute(
+        sa.delete(db.AutomationRelatedResource).where(
+            db.AutomationRelatedResource.automation_id == automation_id,
+        )
+    )
+    await session.execute(
+        sa.delete(db.CompositeTriggerChildFiring).where(
+            db.CompositeTriggerChildFiring.automation_id == automation_id,
+        )
+    )
+
+    # Now delete the parent automation
     await session.execute(
         sa.delete(db.Automation).where(
             db.Automation.id == automation_id,
@@ -241,6 +292,7 @@ async def delete_automation(
     await _sync_automation_related_resources(session, automation_id, None)
 
     await _notify(session, automation, "deleted")
+    await emit_automation_deleted_event(automation)
     return True
 
 
@@ -252,6 +304,14 @@ async def delete_automations_for_workspace(
     automations = await read_automations_for_workspace(
         session,
     )
+
+    # Delete child tables in a consistent order to prevent deadlocks
+    # when multiple workspace deletions occur concurrently
+    await session.execute(sa.delete(db.AutomationBucket))
+    await session.execute(sa.delete(db.AutomationRelatedResource))
+    await session.execute(sa.delete(db.CompositeTriggerChildFiring))
+
+    # Now delete all automations
     result = await session.execute(sa.delete(db.Automation))
     for automation in automations:
         await _notify(session, automation, "deleted")

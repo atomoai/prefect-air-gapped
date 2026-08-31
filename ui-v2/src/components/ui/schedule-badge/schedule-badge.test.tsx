@@ -22,6 +22,7 @@ describe("ScheduleBadge", () => {
 
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Active")).toBeInTheDocument();
 		const badge = screen.getByText("At 12:00 AM");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -30,6 +31,34 @@ describe("ScheduleBadge", () => {
 		});
 		const tooltip = screen.getByRole("tooltip");
 		expect(tooltip).toHaveTextContent("At 12:00 AM (UTC)");
+	});
+
+	it("renders a diverging cron schedule using the raw cron string", async () => {
+		const user = userEvent.setup();
+		const schedule = {
+			id: "test-id",
+			created: new Date().toISOString(),
+			updated: new Date().toISOString(),
+			active: true,
+			schedule: {
+				cron: "0 0 * * SAT/2",
+				timezone: "UTC",
+				day_or: false,
+			},
+		};
+
+		render(<ScheduleBadge schedule={schedule} />);
+
+		expect(screen.getByText("Active")).toBeInTheDocument();
+		expect(screen.getByText("0 0 * * SAT/2")).toBeInTheDocument();
+		expect(screen.queryByText(/at 12:00 am/i)).not.toBeInTheDocument();
+		await user.hover(screen.getByText("0 0 * * SAT/2"));
+		await waitFor(() => {
+			expect(screen.getByRole("tooltip")).toBeVisible();
+		});
+		expect(screen.getByRole("tooltip")).toHaveTextContent(
+			"0 0 * * SAT/2 (UTC)",
+		);
 	});
 
 	it("renders a paused cron schedule correctly", async () => {
@@ -47,6 +76,7 @@ describe("ScheduleBadge", () => {
 		};
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Paused")).toBeInTheDocument();
 		const badge = screen.getByText("At 12:00 AM");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -72,6 +102,7 @@ describe("ScheduleBadge", () => {
 		};
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Active")).toBeInTheDocument();
 		const badge = screen.getByText("Every 1 hour, 1 minute, 1 second");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -99,6 +130,7 @@ describe("ScheduleBadge", () => {
 		};
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Paused")).toBeInTheDocument();
 		const badge = screen.getByText("Every 1 hour, 1 minute, 1 second");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -123,6 +155,7 @@ describe("ScheduleBadge", () => {
 		};
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Active")).toBeInTheDocument();
 		const badge = screen.getByText("Every weekday");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -147,6 +180,7 @@ describe("ScheduleBadge", () => {
 		};
 		render(<ScheduleBadge schedule={schedule} />);
 
+		expect(screen.getByText("Paused")).toBeInTheDocument();
 		const badge = screen.getByText("Every weekday");
 		expect(badge).toBeInTheDocument();
 		await user.hover(badge);
@@ -179,6 +213,8 @@ describe("ScheduleBadgeGroup", () => {
 
 		render(<ScheduleBadgeGroup schedules={schedules} />);
 
+		expect(screen.getByText("Active")).toBeInTheDocument();
+		expect(screen.getByText("Paused")).toBeInTheDocument();
 		const badges = screen.getAllByText("At 12:00 AM");
 		expect(badges).toHaveLength(2);
 	});
@@ -212,6 +248,49 @@ describe("ScheduleBadgeGroup", () => {
 			expect(badges[0]).toBeVisible();
 		});
 		expect(badges).toHaveLength(10);
+		spy.mockRestore();
+	});
+
+	it("shows Active and Paused labels in collapsed hover card for mixed schedules", async () => {
+		const spy = vi
+			.spyOn(useIsOverflowingModule, "useIsOverflowing")
+			.mockReturnValue(true);
+		const user = userEvent.setup();
+		const schedules = [
+			{
+				id: randUuid(),
+				created: new Date().toISOString(),
+				updated: new Date().toISOString(),
+				active: true,
+				schedule: {
+					cron: "0 0 * * *",
+					timezone: "UTC",
+					day_or: false,
+				},
+			},
+			{
+				id: randUuid(),
+				created: new Date().toISOString(),
+				updated: new Date().toISOString(),
+				active: false,
+				schedule: {
+					cron: "0 12 * * *",
+					timezone: "UTC",
+					day_or: false,
+				},
+			},
+		];
+
+		render(<ScheduleBadgeGroup schedules={schedules} />);
+
+		const collapsedBadge = screen.getByText("2 schedules");
+		expect(collapsedBadge).toBeInTheDocument();
+		await user.hover(collapsedBadge);
+
+		await waitFor(() => {
+			expect(screen.getByText("Active")).toBeVisible();
+			expect(screen.getByText("Paused")).toBeVisible();
+		});
 		spy.mockRestore();
 	});
 });

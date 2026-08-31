@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Literal, Optional, Union
 from uuid import UUID
 
+import sqlalchemy as sa
 from fastapi import Body, Depends, HTTPException, Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +18,21 @@ from prefect.server.database import PrefectDBInterface, provide_database_interfa
 from prefect.server.schemas import actions
 from prefect.server.utilities.schemas import PrefectBaseModel
 from prefect.server.utilities.server import PrefectRouter
+from prefect.settings.context import get_current_settings
 from prefect.types._concurrency import ConcurrencyLeaseHolder
+from prefect.utilities.math import clamped_poisson_interval
 
 router: PrefectRouter = PrefectRouter(
     prefix="/v2/concurrency_limits", tags=["Concurrency Limits V2"]
 )
+
+
+def _global_concurrency_limit_response(
+    model: object, active_slots: float | int
+) -> schemas.responses.GlobalConcurrencyLimitResponse:
+    return schemas.responses.GlobalConcurrencyLimitResponse.model_validate(
+        model
+    ).model_copy(update={"active_slots": int(active_slots)})
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -56,20 +67,25 @@ async def read_concurrency_limit_v2(
             pass
     async with db.session_context() as session:
         if isinstance(id_or_name, UUID):
-            model = await models.concurrency_limits_v2.read_concurrency_limit(
-                session, concurrency_limit_id=id_or_name
-            )
+            where = db.ConcurrencyLimitV2.id == id_or_name
         else:
-            model = await models.concurrency_limits_v2.read_concurrency_limit(
-                session, name=id_or_name
-            )
+            where = db.ConcurrencyLimitV2.name == id_or_name
+        result = await session.execute(
+            sa.select(
+                db.ConcurrencyLimitV2,
+                models.concurrency_limits_v2.active_slots_after_decay(db).label(
+                    "active_slots"
+                ),
+            ).where(where)
+        )
+        row = result.first()
 
-    if not model:
+    if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Concurrency Limit not found"
         )
 
-    return schemas.responses.GlobalConcurrencyLimitResponse.model_validate(model)
+    return _global_concurrency_limit_response(row[0], row.active_slots)
 
 
 @router.post("/filter")
@@ -79,17 +95,23 @@ async def read_all_concurrency_limits_v2(
     db: PrefectDBInterface = Depends(provide_database_interface),
 ) -> List[schemas.responses.GlobalConcurrencyLimitResponse]:
     async with db.session_context() as session:
-        concurrency_limits = (
-            await models.concurrency_limits_v2.read_all_concurrency_limits(
-                session=session,
-                limit=limit,
-                offset=offset,
-            )
-        )
+        query = sa.select(
+            db.ConcurrencyLimitV2,
+            models.concurrency_limits_v2.active_slots_after_decay(db).label(
+                "active_slots"
+            ),
+        ).order_by(db.ConcurrencyLimitV2.name)
+
+        if offset is not None:
+            query = query.offset(offset)
+        if limit is not None:
+            query = query.limit(limit)
+
+        result = await session.execute(query)
+        rows = result.all()
 
     return [
-        schemas.responses.GlobalConcurrencyLimitResponse.model_validate(limit)
-        for limit in concurrency_limits
+        _global_concurrency_limit_response(row[0], row.active_slots) for row in rows
     ]
 
 
@@ -217,6 +239,24 @@ async def _generate_concurrency_locked_response(
     limits: list[schemas.core.ConcurrencyLimitV2],
     slots: int,
 ) -> HTTPException:
+    """
+    Generate a 423 Locked response when concurrency slots cannot be acquired.
+
+    Calculates an appropriate Retry-After header value based on the blocking limit's
+    characteristics. For limits without slot decay, caps avg_slot_occupancy_seconds
+    at a configured maximum to prevent excessive retry delays from long-running tasks:
+
+    - Tag-based limits (name starts with "tag:"): Capped at tag_concurrency_slot_wait_seconds
+      (default 30s) to restore V1 behavior that users relied on
+    - Other limits: Capped at maximum_concurrency_slot_wait_seconds (default 30s) to allow
+      more uniform queues while still preventing astronomical delays
+
+    Low average occupancies are always respected (e.g., 2s stays 2s, not forced higher).
+    Limits with slot decay use the decay rate directly without capping.
+
+    The final retry value includes jitter via clamped_poisson_interval to prevent
+    thundering herd when many tasks retry simultaneously.
+    """
     active_limits = [limit for limit in limits if bool(limit.active)]
 
     await models.concurrency_limits_v2.bulk_update_denied_slots(
@@ -234,13 +274,22 @@ async def _generate_concurrency_locked_response(
     blocking_limit = max((limit for limit in active_limits), key=num_blocking_slots)
     blocking_slots = num_blocking_slots(blocking_limit)
 
-    wait_time_per_slot = (
-        blocking_limit.avg_slot_occupancy_seconds
-        if blocking_limit.slot_decay_per_second == 0.0
-        else (1.0 / blocking_limit.slot_decay_per_second)
-    )
+    if blocking_limit.slot_decay_per_second == 0.0:
+        settings = get_current_settings()
+        max_wait = (
+            settings.server.tasks.tag_concurrency_slot_wait_seconds
+            if blocking_limit.name.startswith("tag:")
+            else settings.server.concurrency.maximum_concurrency_slot_wait_seconds
+        )
+        wait_time_per_slot = min(blocking_limit.avg_slot_occupancy_seconds, max_wait)
+        # Cap the total wait time at max_wait to prevent excessive retry delays
+        # when denied_slots accumulates from burst traffic
+        average_interval = min(wait_time_per_slot * blocking_slots, max_wait)
+    else:
+        wait_time_per_slot = 1.0 / blocking_limit.slot_decay_per_second
+        average_interval = wait_time_per_slot * blocking_slots
 
-    retry_after = wait_time_per_slot * blocking_slots
+    retry_after = clamped_poisson_interval(average_interval=average_interval)
 
     return HTTPException(
         status_code=status.HTTP_423_LOCKED,

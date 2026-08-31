@@ -27,6 +27,27 @@ from typing import AsyncGenerator, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
+
+# Eagerly import numpy before pytest-xdist forks worker subprocesses.
+#
+# fakeredis 2.35.0 added optional vector-set commands that import numpy at
+# module-load time if it's available (see fakeredis/stack/__init__.py and
+# fakeredis/model/__init__.py). Our test environment has numpy transitively,
+# so fakeredis picks it up.
+#
+# Under `pytest -n auto`, xdist forks worker processes. If numpy is only
+# partially initialized in the parent at fork time and then fakeredis
+# triggers a numpy import inside the worker, numpy's `_reload_guard()`
+# fires a `UserWarning: The NumPy module was reloaded`, which our
+# warning-as-error config promotes to a hard failure. This reproduces only
+# on Python 3.10; newer Python/NumPy combinations tolerate the
+# fork-plus-reimport dance.
+#
+# Importing numpy here forces it to fully initialize in the parent before
+# xdist forks, so workers inherit a complete module and fakeredis's lazy
+# import is a no-op. Remove this once fakeredis makes its numpy import
+# lazy (deferred until a vector-set command is actually issued).
+import numpy  # noqa: F401
 import pytest
 from pytest_asyncio import is_async_test
 from sqlalchemy.dialects.postgresql.asyncpg import dialect as postgres_dialect
@@ -51,6 +72,7 @@ from prefect.settings import (
     PREFECT_API_URL,
     PREFECT_CLI_COLORS,
     PREFECT_CLI_WRAP_LINES,
+    PREFECT_FLOWS_HEARTBEAT_FREQUENCY,
     PREFECT_HOME,
     PREFECT_LOCAL_STORAGE_PATH,
     PREFECT_LOGGING_INTERNAL_LEVEL,
@@ -126,22 +148,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         ),
     )
 
-
-# The following tests are excluded from the clear_db fixture because they are
-# are safe to run without first clearing the database. Not clearing the database
-# after each run generally results in a 25 to 100% speed up of the test suite, so
-# if you run across tests that don't rely on a clean database, you can add them
-# to this list to speed up the test suite.
-EXCLUDE_FROM_CLEAR_DB_AUTO_MARK = [
-    "tests/utilities",
-    "tests/agent",
-    "tests/test_settings.py",
-    "tests/_internal",
-    "tests/server/orchestration/test_rules.py",
-    "tests/test_flows.py",
-    "tests/server/orchestration/api/ui/test_task_runs.py",
-    "tests/test_transactions.py",
-]
+    parser.addoption(
+        "--no-clear-db",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the clear_db fixture even for tests marked @pytest.mark.clear_db. "
+            "Use to audit whether a test still requires a clean database; if it "
+            "passes with this flag, the marker can be removed."
+        ),
+    )
 
 
 def pytest_collection_modifyitems(
@@ -155,6 +171,18 @@ def pytest_collection_modifyitems(
     session_scope_marker = pytest.mark.asyncio(loop_scope="session")
     for async_test in pytest_asyncio_tests:
         async_test.add_marker(session_scope_marker, append=False)
+
+    # Skip tests marked with @pytest.mark.windows on non-Windows platforms
+    if sys.platform != "win32":
+        for item in items:
+            if item.get_closest_marker("windows"):
+                item.add_marker(pytest.mark.skip(reason="Test only runs on Windows"))
+
+    # Skip tests marked with @pytest.mark.unix on Windows
+    if sys.platform == "win32":
+        for item in items:
+            if item.get_closest_marker("unix"):
+                item.add_marker(pytest.mark.skip(reason="Test only runs on Unix"))
 
     exclude_all_services = config.getoption("--exclude-services")
     if exclude_all_services:
@@ -217,14 +245,6 @@ def pytest_collection_modifyitems(
                     pytest.mark.skip(only_running_blurb + " " + requires_blurb)
                 )
         return
-
-    for item in items:
-        # Check if the test file is not in the excluded list
-        if not any(
-            excluded in item.nodeid for excluded in EXCLUDE_FROM_CLEAR_DB_AUTO_MARK
-        ):
-            # Apply the custom mark to clear the database prior to the test
-            item.add_marker(pytest.mark.clear_db)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -350,6 +370,9 @@ def pytest_sessionstart(session: pytest.Session):
             PREFECT_API_SERVICES_TRIGGERS_ENABLED: False,
             # Disable the task run recorder service
             PREFECT_API_SERVICES_TASK_RUN_RECORDER_ENABLED: False,
+            # Disable heartbeats during tests to avoid spawning background
+            # threads/tasks that slow down the test suite
+            PREFECT_FLOWS_HEARTBEAT_FREQUENCY: None,
         },
         source=__file__,
     )
@@ -379,8 +402,10 @@ def cleanup(drain_log_workers: None, drain_events_workers: None):
     yield
 
     # delete the temporary directory
+    # Use ignore_errors=True to handle race conditions where SQLite auxiliary
+    # files (.db-shm, .db-wal) may be deleted by SQLite before rmtree runs
     if TEST_PREFECT_HOME is not None:
-        shutil.rmtree(TEST_PREFECT_HOME)
+        shutil.rmtree(TEST_PREFECT_HOME, ignore_errors=True)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -556,9 +581,35 @@ def reset_sys_modules():
     yield
 
     # Delete all of the module objects that were introduced so they are not
-    # cached.
+    # cached.  Also remove stale references from parent packages so that
+    # subsequent monkeypatch / import resolution doesn't find a stale module
+    # object via getattr on the parent while sys.modules has no entry.
+    #
+    # Preserve prefect.cli.* and cyclopts modules: cyclopts lazy loading caches
+    # resolved command Apps and type converters internally.  Removing a module
+    # from sys.modules creates a stale-reference split where cyclopts holds the
+    # old module's objects but monkeypatch / re-import resolution finds a freshly
+    # re-imported copy.  For cyclopts specifically, deleting its lazily-imported
+    # submodules (e.g. cyclopts._convert) breaks type-converter identity on the
+    # next in-process invocation, surfacing as spurious "unable to convert ...
+    # into str" CoercionErrors on every command after the first.
+    def _should_preserve(module: str) -> bool:
+        return (
+            module.startswith("prefect.cli.")
+            or module == "cyclopts"
+            or module.startswith("cyclopts.")
+        )
+
     for module in set(sys.modules.keys()):
-        if module not in original_modules:
+        if module not in original_modules and not _should_preserve(module):
+            parts = module.rsplit(".", 1)
+            if len(parts) == 2:
+                parent = sys.modules.get(parts[0])
+                if parent is not None:
+                    try:
+                        delattr(parent, parts[1])
+                    except AttributeError:
+                        pass
             del sys.modules[module]
 
     importlib.invalidate_caches()

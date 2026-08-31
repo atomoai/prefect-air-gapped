@@ -7,12 +7,14 @@ import {
 } from "@/api/block-documents";
 import { BlockTypeDetails } from "@/components/blocks/block-type-details";
 import {
+	LazySchemaForm,
 	type PrefectSchemaObject,
-	SchemaForm,
 	useSchemaForm,
 } from "@/components/schemas";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { BlockDocumentEditPageHeader } from "./block-document-edit-page-header";
 
 type BlockDocumentEditPageProps = {
@@ -73,7 +75,14 @@ export const BlockDocumentEditPage = ({
 					className="flex flex-col gap-4"
 					onSubmit={(e) => void handleSubmit(e)}
 				>
-					<SchemaForm
+					<div className="flex flex-col gap-2">
+						<Label htmlFor="block-name">Block Name</Label>
+						<Input id="block-name" value={blockDocument.name ?? ""} disabled />
+						<p className="text-sm text-muted-foreground">
+							Block names are not editable
+						</p>
+					</div>
+					<LazySchemaForm
 						values={values}
 						onValuesChange={setValues}
 						errors={errors}

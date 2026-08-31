@@ -5,7 +5,9 @@ Internal utilities for tests.
 from __future__ import annotations
 
 import atexit
+import inspect
 import shutil
+import socket
 import warnings
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -20,6 +22,7 @@ from prefect.client.orchestration import get_client
 from prefect.client.schemas import sorting
 from prefect.client.schemas.filters import FlowFilter, FlowFilterName
 from prefect.client.utilities import inject_client
+from prefect.events.worker import EventsWorker
 from prefect.logging.handlers import APILogWorker
 from prefect.results import (
     ResultRecord,
@@ -30,6 +33,7 @@ from prefect.results import (
 from prefect.serializers import Serializer
 from prefect.server.api.server import SubprocessASGIServer
 from prefect.states import State
+from prefect.utilities.asyncutils import run_coro_as_sync
 
 if TYPE_CHECKING:
     from prefect.client.orchestration import PrefectClient
@@ -46,6 +50,12 @@ def exceptions_equal(a: Exception, b: Exception) -> bool:
     if a == b:
         return True
     return type(a) is type(b) and getattr(a, "args", None) == getattr(b, "args", None)
+
+
+def _find_available_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def kubernetes_environments_equal(
@@ -150,12 +160,20 @@ def prefect_test_harness(server_startup_timeout: int | None = 30):
             prefect.settings.temporary_settings(
                 # Use a temporary directory for the database
                 updates={
-                    prefect.settings.PREFECT_API_DATABASE_CONNECTION_URL: DB_PATH,
+                    prefect.settings.PREFECT_SERVER_DATABASE_CONNECTION_URL: DB_PATH,
                 },
             )
         )
         # start a subprocess server to test against
-        test_server = SubprocessASGIServer()
+        test_server = SubprocessASGIServer(port=_find_available_port())
+        # Save any pre-existing default (None-keyed) server so we can restore
+        # it after the harness exits, then register the harness server under
+        # the None key so that internal code calling SubprocessASGIServer()
+        # during flow execution finds this instance instead of spawning a
+        # second unmanaged server subprocess.
+        # See https://github.com/PrefectHQ/prefect/issues/21544
+        prior_default_server = SubprocessASGIServer._instances.get(None)
+        SubprocessASGIServer._instances[None] = test_server
         test_server.start(
             timeout=server_startup_timeout
             if server_startup_timeout is not None
@@ -171,8 +189,33 @@ def prefect_test_harness(server_startup_timeout: int | None = 30):
         )
         yield
         # drain the logs before stopping the server to avoid connection errors on shutdown
-        APILogWorker.instance().drain()
+        # When running in an async context, drain() and drain_all() return awaitables.
+        # We use a wrapper coroutine passed to run_coro_as_sync to ensure the awaitable
+        # is created and awaited on the same loop, avoiding cross-loop issues (issue #19762)
+
+        async def drain_workers():
+            try:
+                result = APILogWorker.instance().drain()
+                if inspect.isawaitable(result):
+                    await result
+            except RuntimeError:
+                # Worker may not have been started
+                pass
+
+            # drain events to prevent stale events from leaking into subsequent test harnesses
+            result = EventsWorker.drain_all()
+            if inspect.isawaitable(result):
+                await result
+
+        run_coro_as_sync(drain_workers())
+
         test_server.stop()
+        # Restore the prior default server if one existed, otherwise clean up
+        # the None-key alias we added above
+        if prior_default_server is not None:
+            SubprocessASGIServer._instances[None] = prior_default_server
+        else:
+            SubprocessASGIServer._instances.pop(None, None)
 
 
 async def get_most_recent_flow_run(

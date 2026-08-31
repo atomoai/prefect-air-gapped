@@ -43,6 +43,7 @@ Examples:
 
 import io
 import shutil
+import subprocess
 import urllib.parse
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,8 +52,9 @@ from typing import Optional, Tuple, Union
 from pydantic import Field
 from tenacity import retry, stop_after_attempt, wait_fixed, wait_random
 
+from prefect._internal.compatibility.async_dispatch import async_dispatch
+from prefect._internal.urls import strip_auth_from_urls_in_text
 from prefect.filesystems import ReadableDeploymentStorage
-from prefect.utilities.asyncutils import sync_compatible
 from prefect.utilities.processutils import run_process
 from prefect_gitlab.credentials import GitLabCredentials
 
@@ -115,6 +117,12 @@ class GitLabRepository(ReadableDeploymentStorage):
 
         return full_url
 
+    def _git_error_extra_secrets(self) -> list[str]:
+        if self.credentials is None:
+            return []
+        token = self.credentials.token.get_secret_value()
+        return [token, f"oauth2:{token}"]
+
     @staticmethod
     def _get_paths(
         dst_dir: Union[str, None], src_dir: str, sub_directory: Optional[str]
@@ -135,7 +143,6 @@ class GitLabRepository(ReadableDeploymentStorage):
 
         return str(content_source), str(content_destination)
 
-    @sync_compatible
     @retry(
         stop=stop_after_attempt(MAX_CLONE_ATTEMPTS),
         wait=wait_fixed(CLONE_RETRY_MIN_DELAY_SECONDS)
@@ -145,13 +152,14 @@ class GitLabRepository(ReadableDeploymentStorage):
         ),
         reraise=True,
     )
-    async def get_directory(
+    async def aget_directory(
         self, from_path: Optional[str] = None, local_path: Optional[str] = None
     ) -> None:
         """
         Clones a GitLab project specified in `from_path` to the provided `local_path`;
         defaults to cloning the repository reference configured on the Block to the
-        present working directory.
+        present working directory. Async version.
+
         Args:
             from_path: If provided, interpreted as a subdirectory of the underlying
                 repository that will be copied to the provided local path.
@@ -175,7 +183,58 @@ class GitLabRepository(ReadableDeploymentStorage):
             process = await run_process(cmd, stream_output=(out_stream, err_stream))
             if process.returncode != 0:
                 err_stream.seek(0)
-                raise OSError(f"Failed to pull from remote:\n {err_stream.read()}")
+                sanitized_error = strip_auth_from_urls_in_text(
+                    err_stream.read(), extra_secrets=self._git_error_extra_secrets()
+                )
+                raise OSError(f"Failed to pull from remote:\n {sanitized_error}")
+
+            content_source, content_destination = self._get_paths(
+                dst_dir=local_path, src_dir=tmp_dir, sub_directory=from_path
+            )
+
+            shutil.copytree(
+                src=content_source, dst=content_destination, dirs_exist_ok=True
+            )
+
+    @retry(
+        stop=stop_after_attempt(MAX_CLONE_ATTEMPTS),
+        wait=wait_fixed(CLONE_RETRY_MIN_DELAY_SECONDS)
+        + wait_random(
+            CLONE_RETRY_MIN_DELAY_JITTER_SECONDS,
+            CLONE_RETRY_MAX_DELAY_JITTER_SECONDS,
+        ),
+        reraise=True,
+    )
+    @async_dispatch(aget_directory)
+    def get_directory(
+        self, from_path: Optional[str] = None, local_path: Optional[str] = None
+    ) -> None:
+        """
+        Clones a GitLab project specified in `from_path` to the provided `local_path`;
+        defaults to cloning the repository reference configured on the Block to the
+        present working directory.
+
+        Args:
+            from_path: If provided, interpreted as a subdirectory of the underlying
+                repository that will be copied to the provided local path.
+            local_path: A local path to clone to; defaults to present working directory.
+        """
+        cmd = ["git", "clone", self._create_repo_url()]
+        if self.reference:
+            cmd += ["-b", self.reference]
+
+        if self.git_depth is not None:
+            cmd += ["--depth", str(self.git_depth)]
+
+        with TemporaryDirectory(suffix="prefect") as tmp_dir:
+            cmd.append(tmp_dir)
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                sanitized_error = strip_auth_from_urls_in_text(
+                    result.stderr, extra_secrets=self._git_error_extra_secrets()
+                )
+                raise OSError(f"Failed to pull from remote:\n {sanitized_error}")
 
             content_source, content_destination = self._get_paths(
                 dst_dir=local_path, src_dir=tmp_dir, sub_directory=from_path

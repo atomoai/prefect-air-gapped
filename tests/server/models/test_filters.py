@@ -12,6 +12,8 @@ from prefect.server import models
 from prefect.server.schemas import actions, core, filters, schedules, states
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture(autouse=True, scope="module")
 async def clear_db(db):
@@ -771,6 +773,34 @@ class TestCountTaskRunsModels:
             dict(
                 task_run_filter=filters.TaskRunFilter(
                     subflow_runs=dict(exists_=True), tags=dict(all_=["subflow"])
+                )
+            ),
+            0,
+        ],
+        # task runs with end_time set (completed or failed)
+        [
+            dict(task_run_filter=filters.TaskRunFilter(end_time=dict(is_null_=False))),
+            5,
+        ],
+        # task runs with null end_time (running or no state)
+        [
+            dict(task_run_filter=filters.TaskRunFilter(end_time=dict(is_null_=True))),
+            5,
+        ],
+        # task runs with end_time before now + 1 day (all completed/failed runs)
+        [
+            dict(
+                task_run_filter=filters.TaskRunFilter(
+                    end_time=dict(before_=now("UTC") + timedelta(days=1))
+                )
+            ),
+            5,
+        ],
+        # task runs with end_time after now + 1 day (none)
+        [
+            dict(
+                task_run_filter=filters.TaskRunFilter(
+                    end_time=dict(after_=now("UTC") + timedelta(days=1))
                 )
             ),
             0,

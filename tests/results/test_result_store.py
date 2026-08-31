@@ -1,18 +1,29 @@
+import uuid
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 import prefect.exceptions
 import prefect.results
+import prefect.types._datetime
 from prefect import flow, task
+from prefect.client.base import ServerType
+from prefect.client.schemas.objects import ServerDefaultResultStorage
 from prefect.context import FlowRunContext, get_run_context
-from prefect.filesystems import LocalFileSystem
+from prefect.filesystems import LocalFileSystem, WritableFileSystem
 from prefect.locking.memory import MemoryLockManager
 from prefect.results import (
     ResultRecord,
     ResultStore,
+    _get_default_persist_result,
+    _result_storage_is_configured_for_remote_retrieval,
     should_persist_result,
 )
 from prefect.serializers import JSONSerializer, PickleSerializer
 from prefect.settings import (
+    PREFECT_DEFAULT_RESULT_STORAGE_BLOCK,
     PREFECT_LOCAL_STORAGE_PATH,
     PREFECT_RESULTS_DEFAULT_SERIALIZER,
     PREFECT_RESULTS_PERSIST_BY_DEFAULT,
@@ -178,9 +189,10 @@ def test_root_flow_custom_serializer_by_instance(default_persistence_off):
 
 async def test_root_flow_custom_storage_by_slug(tmp_path, default_persistence_off):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
-    @flow(result_storage="local-file-system/test")
+    @flow(result_storage=f"local-file-system/{block_name}")
     def foo():
         return get_run_context().result_store, should_persist_result()
 
@@ -195,7 +207,8 @@ async def test_root_flow_custom_storage_by_instance_presaved(
     tmp_path, default_persistence_off
 ):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
     @flow(result_storage=storage)
     def foo():
@@ -360,9 +373,10 @@ def test_child_flow_inherits_custom_serializer(default_persistence_off):
 
 async def test_child_flow_inherits_custom_storage(tmp_path, default_persistence_off):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
-    @flow(result_storage="local-file-system/test")
+    @flow(result_storage=f"local-file-system/{block_name}")
     def foo():
         child_store, child_persist_result = bar()
         return get_run_context().result_store, child_persist_result, child_store
@@ -380,14 +394,15 @@ async def test_child_flow_inherits_custom_storage(tmp_path, default_persistence_
 
 async def test_child_flow_custom_storage(tmp_path, default_persistence_off):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
     @flow()
     def foo():
         child_store, child_persist_result = bar()
         return get_run_context().result_store, child_persist_result, child_store
 
-    @flow(result_storage="local-file-system/test")
+    @flow(result_storage=f"local-file-system/{block_name}")
     def bar():
         return get_run_context().result_store, should_persist_result()
 
@@ -584,9 +599,10 @@ def test_task_inherits_custom_serializer(default_persistence_off):
 
 async def test_task_inherits_custom_storage(tmp_path):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
-    @flow(result_storage="local-file-system/test", persist_result=True)
+    @flow(result_storage=f"local-file-system/{block_name}", persist_result=True)
     def foo():
         child_store, child_persist_result = bar()
         return get_run_context().result_store, child_persist_result, child_store
@@ -622,14 +638,15 @@ def test_task_custom_serializer(default_persistence_off):
 
 async def test_nested_flow_custom_storage(tmp_path):
     storage = LocalFileSystem(basepath=tmp_path / "test")
-    storage_id = await storage.save("test")
+    block_name = f"test-{uuid.uuid4()}"
+    storage_id = await storage.save(block_name)
 
     @flow(persist_result=True)
     def foo():
         child_store, child_persist_result = bar()
         return get_run_context().result_store, child_persist_result, child_store
 
-    @flow(result_storage="local-file-system/test", persist_result=True)
+    @flow(result_storage=f"local-file-system/{block_name}", persist_result=True)
     def bar():
         return get_run_context().result_store, should_persist_result()
 
@@ -850,6 +867,17 @@ async def test_result_store_exists_with_metadata_storage(tmp_path):
     assert not result_store.exists(key=key)
 
 
+async def test_default_result_store_exists_resolves_default_storage(tmp_path: Path):
+    with temporary_settings({PREFECT_LOCAL_STORAGE_PATH: tmp_path}):
+        writer = ResultStore()
+        writer.write(obj="test", key="test")
+
+        reader = ResultStore()
+
+        assert reader.exists(key="test")
+        assert await reader.aexists(key="test")
+
+
 async def test_result_store_exists_with_no_metadata_storage(tmp_path):
     result_storage = LocalFileSystem(basepath=tmp_path / "results")
     result_store = ResultStore(result_storage=result_storage)
@@ -881,3 +909,399 @@ async def test_supports_isolation_level():
     assert not store_without_lock_manager.supports_isolation_level(
         IsolationLevel.SERIALIZABLE
     )
+
+
+class TestInMemoryCacheExpiration:
+    """Tests for in-memory cache expiration in ResultStore._read and _aread."""
+
+    async def test_read_returns_cached_result_before_expiration(self, tmp_path):
+        result_storage = LocalFileSystem(basepath=tmp_path)
+        store = ResultStore(result_storage=result_storage, cache_result_in_memory=True)
+
+        key = "test-not-expired"
+        expiration = prefect.types._datetime.now("UTC") + timedelta(seconds=60)
+        record = store.create_result_record(
+            "cached_value", key=key, expiration=expiration
+        )
+        store.persist_result_record(record)
+
+        # Warm the in-memory cache
+        first_read = store.read(key=key)
+        assert first_read.result == "cached_value"
+
+        # Second read should still return from cache (not expired)
+        second_read = store.read(key=key)
+        assert second_read.result == "cached_value"
+
+    async def test_read_evicts_expired_result_from_cache(self, tmp_path, advance_time):
+        result_storage = LocalFileSystem(basepath=tmp_path)
+        store = ResultStore(result_storage=result_storage, cache_result_in_memory=True)
+
+        key = "test-expired"
+        expiration = prefect.types._datetime.now("UTC") + timedelta(seconds=1)
+        record = store.create_result_record("old_value", key=key, expiration=expiration)
+        store.persist_result_record(record)
+
+        # Warm the in-memory cache
+        first_read = store.read(key=key)
+        assert first_read.result == "old_value"
+
+        resolved_key = store._resolved_key_path(key)
+        assert resolved_key in store.cache
+
+        # Advance time past expiration
+        advance_time(timedelta(seconds=2))
+
+        # Write a new value to storage to simulate re-execution
+        new_record = store.create_result_record("new_value", key=key)
+        store.persist_result_record(new_record)
+
+        # Read should evict expired entry and return from storage
+        result = store.read(key=key)
+        assert result.result == "new_value"
+
+        # The expired entry should have been evicted from cache
+        # and the new value should now be cached
+        assert resolved_key in store.cache
+        assert store.cache[resolved_key].result == "new_value"
+
+    async def test_aread_evicts_expired_result_from_cache(self, tmp_path, advance_time):
+        result_storage = LocalFileSystem(basepath=tmp_path)
+        store = ResultStore(result_storage=result_storage, cache_result_in_memory=True)
+
+        key = "test-expired-async"
+        expiration = prefect.types._datetime.now("UTC") + timedelta(seconds=1)
+        record = store.create_result_record("old_value", key=key, expiration=expiration)
+        await store.apersist_result_record(record)
+
+        # Warm the in-memory cache
+        first_read = await store.aread(key=key)
+        assert first_read.result == "old_value"
+
+        resolved_key = store._resolved_key_path(key)
+        assert resolved_key in store.cache
+
+        # Advance time past expiration
+        advance_time(timedelta(seconds=2))
+
+        # Write a new value to storage
+        new_record = store.create_result_record("new_value", key=key)
+        await store.apersist_result_record(new_record)
+
+        # Async read should evict expired entry and return from storage
+        result = await store.aread(key=key)
+        assert result.result == "new_value"
+
+    async def test_read_returns_result_with_no_expiration(self, tmp_path):
+        """Results without expiration should always be returned from cache."""
+        result_storage = LocalFileSystem(basepath=tmp_path)
+        store = ResultStore(result_storage=result_storage, cache_result_in_memory=True)
+
+        key = "test-no-expiration"
+        record = store.create_result_record("permanent_value", key=key)
+        store.persist_result_record(record)
+
+        # Warm the in-memory cache
+        first_read = store.read(key=key)
+        assert first_read.result == "permanent_value"
+        assert first_read.metadata.expiration is None
+
+        # Should still return from cache (no expiration means never expires)
+        second_read = store.read(key=key)
+        assert second_read.result == "permanent_value"
+
+
+class TestAsyncDispatch:
+    """Tests for async_dispatch behavior of ResultStore methods."""
+
+    async def test_update_for_flow_dispatches_to_async_in_async_context(self):
+        """Test that update_for_flow dispatches to aupdate_for_flow in async context."""
+
+        @flow
+        async def my_flow():
+            pass
+
+        store = ResultStore()
+        # In async context, calling update_for_flow should return a coroutine
+        result = store.update_for_flow(my_flow)
+        # Should be a coroutine that we can await
+        assert hasattr(result, "__await__")
+        updated_store = await result
+        assert isinstance(updated_store, ResultStore)
+
+    async def test_update_for_task_dispatches_to_async_in_async_context(self):
+        """Test that update_for_task dispatches to aupdate_for_task in async context."""
+
+        @task
+        async def my_task():
+            pass
+
+        store = ResultStore()
+        # In async context, calling update_for_task should return a coroutine
+        result = store.update_for_task(my_task)
+        # Should be a coroutine that we can await
+        assert hasattr(result, "__await__")
+        updated_store = await result
+        assert isinstance(updated_store, ResultStore)
+
+    def test_update_for_flow_returns_sync_in_sync_context(self):
+        """Test that update_for_flow returns directly in sync context."""
+
+        @flow
+        def my_flow():
+            pass
+
+        store = ResultStore()
+        # In sync context, calling update_for_flow should return directly
+        result = store.update_for_flow(my_flow)
+        # Should not be a coroutine
+        assert not hasattr(result, "__await__")
+        assert isinstance(result, ResultStore)
+
+    def test_update_for_task_returns_sync_in_sync_context(self):
+        """Test that update_for_task returns directly in sync context."""
+
+        @task
+        def my_task():
+            pass
+
+        store = ResultStore()
+        # In sync context, calling update_for_task should return directly
+        result = store.update_for_task(my_task)
+        # Should not be a coroutine
+        assert not hasattr(result, "__await__")
+        assert isinstance(result, ResultStore)
+
+
+class TestDefaultResultStorageResolution:
+    @pytest.fixture(autouse=True)
+    def clear_default_storage_cache(self):
+        prefect.results._default_storages.clear()
+        yield
+        prefect.results._default_storages.clear()
+
+    @pytest.mark.parametrize("server_type", [ServerType.SERVER, ServerType.CLOUD])
+    def test_uses_server_default_result_storage_sync(
+        self, monkeypatch: pytest.MonkeyPatch, server_type: ServerType
+    ):
+        block_document_id = uuid.uuid4()
+        expected_storage = MagicMock(spec=WritableFileSystem)
+        client = MagicMock()
+        client.server_type = server_type
+        client.read_server_default_result_storage = MagicMock(
+            return_value=ServerDefaultResultStorage(
+                default_result_storage_block_id=block_document_id
+            )
+        )
+
+        monkeypatch.setattr(
+            "prefect.client.orchestration.get_client", lambda **_: client
+        )
+        monkeypatch.setattr(
+            "prefect.results.resolve_result_storage",
+            MagicMock(return_value=expected_storage),
+        )
+
+        storage = prefect.results.get_default_result_storage()
+
+        assert storage is expected_storage
+
+    def test_should_persist_result_does_not_read_server_default_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "prefect.results._read_server_default_result_storage_block_id",
+            MagicMock(side_effect=AssertionError("server default should not be read")),
+        )
+
+        assert should_persist_result() is False
+
+    def test_configured_default_result_storage_enables_default_persistence(self):
+        with temporary_settings(
+            {PREFECT_DEFAULT_RESULT_STORAGE_BLOCK: "local-file-system/my-results"}
+        ):
+            assert _get_default_persist_result() is True
+
+    def test_block_backed_storage_does_not_enable_default_persistence_by_itself(self):
+        storage = LocalFileSystem(basepath="/tmp/results")
+        storage._block_document_id = uuid.uuid4()
+        result_store = ResultStore(result_storage=storage)
+
+        assert result_store.result_storage_block_id == storage._block_document_id
+        assert _get_default_persist_result() is False
+
+    async def test_configured_default_result_storage_does_not_override_parent_opt_out(
+        self, tmp_path: Path
+    ):
+        block_name = f"parent-result-storage-{uuid.uuid4()}"
+        await LocalFileSystem(basepath=str(tmp_path)).save(block_name)
+
+        @task
+        def my_task():
+            return should_persist_result()
+
+        @flow(
+            persist_result=False,
+            result_storage=f"local-file-system/{block_name}",
+        )
+        def my_flow():
+            return my_task()
+
+        with temporary_settings(
+            {PREFECT_DEFAULT_RESULT_STORAGE_BLOCK: "local-file-system/my-results"}
+        ):
+            assert my_flow() is False
+
+    def test_local_persist_setting_does_not_need_default_result_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "prefect.results._read_server_default_result_storage_block_id",
+            MagicMock(side_effect=AssertionError("server default should not be read")),
+        )
+
+        with temporary_settings({PREFECT_RESULTS_PERSIST_BY_DEFAULT: True}):
+            assert should_persist_result() is True
+
+    def test_task_default_persistence_does_not_read_default_result_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setattr(
+            "prefect.results._read_server_default_result_storage_block_id",
+            MagicMock(side_effect=AssertionError("server default should not be read")),
+        )
+
+        assert prefect.results.get_default_persist_setting_for_tasks() is False
+
+    def test_explicit_task_persistence_setting_overrides_default_persistence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            "prefect.results._read_server_default_result_storage_block_id",
+            MagicMock(side_effect=AssertionError("server default should not be read")),
+        )
+
+        with temporary_settings(
+            {
+                PREFECT_RESULTS_PERSIST_BY_DEFAULT: True,
+                PREFECT_TASKS_DEFAULT_PERSIST_RESULT: False,
+            }
+        ):
+            assert prefect.results.get_default_persist_setting_for_tasks() is False
+
+    def test_local_default_result_storage_is_resolved_before_enabling_persistence(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        read_server_default = MagicMock(
+            side_effect=AssertionError("server default should not be read")
+        )
+        monkeypatch.setattr(
+            "prefect.results._read_server_default_result_storage_block_id",
+            read_server_default,
+        )
+
+        with temporary_settings(
+            {PREFECT_DEFAULT_RESULT_STORAGE_BLOCK: "local-file-system/my-results"}
+        ):
+            assert should_persist_result() is False
+
+    @pytest.mark.parametrize("server_type", [ServerType.SERVER, ServerType.CLOUD])
+    async def test_uses_server_default_result_storage_async(
+        self, monkeypatch: pytest.MonkeyPatch, server_type: ServerType
+    ):
+        block_document_id = uuid.uuid4()
+        expected_storage = MagicMock(spec=WritableFileSystem)
+        client = MagicMock()
+        client.server_type = server_type
+        client.read_server_default_result_storage = AsyncMock(
+            return_value=ServerDefaultResultStorage(
+                default_result_storage_block_id=block_document_id
+            )
+        )
+
+        monkeypatch.setattr(
+            "prefect.client.orchestration.get_client", lambda **_: client
+        )
+        monkeypatch.setattr(
+            "prefect.results.aresolve_result_storage",
+            AsyncMock(return_value=expected_storage),
+        )
+
+        storage = await prefect.results.aget_default_result_storage()
+
+        assert storage is expected_storage
+
+    def test_falls_back_to_local_storage_when_server_default_cannot_be_read_sync(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.setattr(
+            "prefect.client.orchestration.get_client",
+            MagicMock(side_effect=ValueError("No Prefect API URL provided")),
+        )
+        monkeypatch.setattr(
+            "prefect.results.resolve_result_storage",
+            MagicMock(side_effect=AssertionError("should not be called")),
+        )
+
+        with temporary_settings({PREFECT_LOCAL_STORAGE_PATH: tmp_path}):
+            storage = prefect.results.get_default_result_storage()
+
+        assert isinstance(storage, LocalFileSystem)
+        assert storage.basepath == str(tmp_path)
+
+    async def test_falls_back_to_local_storage_when_server_default_cannot_be_read_async(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        monkeypatch.setattr(
+            "prefect.client.orchestration.get_client",
+            MagicMock(side_effect=ValueError("No Prefect API URL provided")),
+        )
+        monkeypatch.setattr(
+            "prefect.results.aresolve_result_storage",
+            AsyncMock(side_effect=AssertionError("should not be called")),
+        )
+
+        with temporary_settings({PREFECT_LOCAL_STORAGE_PATH: tmp_path}):
+            storage = await prefect.results.aget_default_result_storage()
+
+        assert isinstance(storage, LocalFileSystem)
+        assert storage.basepath == str(tmp_path)
+
+
+class TestRemoteResultStorageConfiguration:
+    def test_returns_true_for_explicit_flow_storage(self, tmp_path: Path):
+        explicit_storage = tmp_path / "explicit"
+        current_storage = LocalFileSystem(basepath=tmp_path / "current")
+
+        is_configured = _result_storage_is_configured_for_remote_retrieval(
+            explicit_storage,
+            current_storage,
+        )
+
+        assert is_configured is True
+
+    def test_returns_true_for_non_local_current_result_store_storage(self):
+        current_storage = MagicMock(spec=WritableFileSystem)
+
+        is_configured = _result_storage_is_configured_for_remote_retrieval(
+            None,
+            current_storage,
+        )
+
+        assert is_configured is True
+
+    def test_returns_false_for_local_current_result_store_storage(self, tmp_path: Path):
+        current_storage = LocalFileSystem(basepath=tmp_path / "current")
+
+        is_configured = _result_storage_is_configured_for_remote_retrieval(
+            None,
+            current_storage,
+        )
+
+        assert is_configured is False
+
+    def test_returns_false_when_no_result_storage_is_configured(self):
+        is_configured = _result_storage_is_configured_for_remote_retrieval(None, None)
+
+        assert is_configured is False

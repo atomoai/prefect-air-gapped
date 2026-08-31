@@ -1,10 +1,7 @@
-import {
-	type ColumnFiltersState,
-	createColumnHelper,
-	getCoreRowModel,
-	type OnChangeFn,
-	type PaginationState,
-	useReactTable,
+import type {
+	ColumnFiltersState,
+	OnChangeFn,
+	PaginationState,
 } from "@tanstack/react-table";
 import type React from "react";
 import { useCallback, useMemo } from "react";
@@ -20,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { TagBadgeGroup } from "@/components/ui/tag-badge-group";
 import { TagsInput } from "@/components/ui/tags-input";
+import { createColumnHelper, useTable } from "@/lib/tanstack-table";
 import { pluralize } from "@/utils";
 import { ActionsCell, ValueCell } from "./cells";
 
@@ -27,45 +25,56 @@ const columnHelper = createColumnHelper<components["schemas"]["Variable"]>();
 
 const createColumns = (
 	onVariableEdit: (variable: components["schemas"]["Variable"]) => void,
-) => [
-	columnHelper.accessor("name", {
-		header: "Name",
-	}),
-	columnHelper.accessor("value", {
-		header: "Value",
-		cell: ValueCell,
-	}),
-	columnHelper.accessor("updated", {
-		header: "Updated",
-		cell: (props) => {
-			const updated = props.getValue();
-			if (!updated) return null;
-			return new Date(updated ?? new Date())
-				.toLocaleString(undefined, {
-					year: "numeric",
-					month: "numeric",
-					day: "numeric",
-					hour: "numeric",
-					minute: "numeric",
-					second: "numeric",
-					hour12: true,
-				})
-				.replace(",", "");
-		},
-	}),
-	columnHelper.accessor("tags", {
-		header: () => null,
-		cell: (props) => {
-			const tags = props.getValue();
-			if (!tags) return null;
-			return <TagBadgeGroup tags={tags} maxTagsDisplayed={3} />;
-		},
-	}),
-	columnHelper.display({
-		id: "actions",
-		cell: (props) => <ActionsCell {...props} onVariableEdit={onVariableEdit} />,
-	}),
-];
+	onVariableDelete: (variable: components["schemas"]["Variable"]) => void,
+) =>
+	columnHelper.columns([
+		columnHelper.accessor("name", {
+			header: "Name",
+		}),
+		columnHelper.accessor("value", {
+			header: "Value",
+			cell: ValueCell,
+		}),
+		columnHelper.accessor("updated", {
+			header: "Updated",
+			cell: (props) => {
+				const updated = props.getValue();
+				if (!updated) return null;
+				const formatted = new Date(updated ?? new Date())
+					.toLocaleString(undefined, {
+						year: "numeric",
+						month: "numeric",
+						day: "numeric",
+						hour: "numeric",
+						minute: "numeric",
+						second: "numeric",
+						hour12: true,
+					})
+					.replace(",", "");
+				return (
+					<span className="text-muted-foreground text-sm">{formatted}</span>
+				);
+			},
+		}),
+		columnHelper.accessor("tags", {
+			header: () => null,
+			cell: (props) => {
+				const tags = props.getValue();
+				if (!tags) return null;
+				return <TagBadgeGroup tags={tags} maxTagsDisplayed={3} />;
+			},
+		}),
+		columnHelper.display({
+			id: "actions",
+			cell: (props) => (
+				<ActionsCell
+					{...props}
+					onVariableEdit={onVariableEdit}
+					onVariableDelete={onVariableDelete}
+				/>
+			),
+		}),
+	]);
 
 type VariablesDataTableProps = {
 	variables: components["schemas"]["Variable"][];
@@ -77,6 +86,7 @@ type VariablesDataTableProps = {
 	sorting: components["schemas"]["VariableSort"];
 	onSortingChange: (sortKey: components["schemas"]["VariableSort"]) => void;
 	onVariableEdit: (variable: components["schemas"]["Variable"]) => void;
+	onVariableDelete: (variable: components["schemas"]["Variable"]) => void;
 };
 
 export const VariablesDataTable = ({
@@ -89,10 +99,11 @@ export const VariablesDataTable = ({
 	sorting,
 	onSortingChange,
 	onVariableEdit,
+	onVariableDelete,
 }: VariablesDataTableProps) => {
 	const columns = useMemo(
-		() => createColumns(onVariableEdit),
-		[onVariableEdit],
+		() => createColumns(onVariableEdit, onVariableDelete),
+		[onVariableEdit, onVariableDelete],
 	);
 
 	const nameSearchValue = columnFilters.find((filter) => filter.id === "name")
@@ -123,25 +134,20 @@ export const VariablesDataTable = ({
 
 	const handlePaginationChange: OnChangeFn<PaginationState> = useCallback(
 		(updater) => {
-			let newPagination = pagination;
-			if (typeof updater === "function") {
-				newPagination = updater(pagination);
-			} else {
-				newPagination = updater;
-			}
+			const newPagination =
+				typeof updater === "function" ? updater(pagination) : updater;
 			onPaginationChange(newPagination);
 		},
 		[pagination, onPaginationChange],
 	);
 
-	const table = useReactTable({
+	const table = useTable({
 		data: variables,
 		columns: columns,
 		state: {
 			pagination,
 			columnFilters,
 		},
-		getCoreRowModel: getCoreRowModel(),
 		manualPagination: true,
 		onPaginationChange: handlePaginationChange,
 		rowCount: currentVariableCount,
@@ -152,27 +158,28 @@ export const VariablesDataTable = ({
 
 	return (
 		<div>
-			<div className="grid sm:grid-cols-2 md:grid-cols-6 lg:grid-cols-12 gap-2 pb-4 items-center">
-				<div className="sm:col-span-2 md:col-span-6 lg:col-span-4 order-last lg:order-first">
+			<div className="grid sm:grid-cols-2 md:grid-cols-12 gap-2 pb-4 items-center">
+				<div className="sm:col-span-2 md:col-span-3 lg:col-span-4 md:order-first lg:order-first">
 					<p className="text-sm text-muted-foreground">
-						{currentVariableCount} {pluralize(currentVariableCount, "Variable")}
+						{currentVariableCount.toLocaleString()}{" "}
+						{pluralize(currentVariableCount, "Variable")}
 					</p>
 				</div>
-				<div className="sm:col-span-2 md:col-span-2 lg:col-span-3">
+				<div className="sm:col-span-2 md:col-span-3 lg:col-span-3">
 					<SearchInput
 						placeholder="Search variables"
 						value={nameSearchValue}
 						onChange={(e) => handleNameSearchChange(e.target.value)}
 					/>
 				</div>
-				<div className="xs:col-span-1 md:col-span-2 lg:col-span-3">
+				<div className="sm:col-span-2 md:col-span-3 lg:col-span-3">
 					<TagsInput
 						placeholder="Filter by tags"
 						onChange={handleTagsSearchChange}
 						value={tagsSearchValue}
 					/>
 				</div>
-				<div className="xs:col-span-1 md:col-span-2 lg:col-span-2">
+				<div className="sm:col-span-2 md:col-span-3 lg:col-span-2">
 					<Select value={sorting} onValueChange={onSortingChange}>
 						<SelectTrigger aria-label="Variable sort order" className="w-full">
 							<SelectValue placeholder="Sort by" />

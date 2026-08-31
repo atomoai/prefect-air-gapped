@@ -75,9 +75,10 @@ function BasicInfoSection({ workPool }: { workPool: WorkPool }) {
 			field: "Concurrency Limit",
 			ComponentValue: () => (
 				<FieldValue>
-					{workPool.concurrency_limit
+					{workPool.concurrency_limit !== null &&
+					workPool.concurrency_limit !== undefined
 						? String(workPool.concurrency_limit)
-						: "Unlimited"}
+						: "∞"}
 				</FieldValue>
 			),
 		},
@@ -183,11 +184,15 @@ function JobTemplateSection({ workPool }: { workPool: WorkPool }) {
 		if (Array.isArray(value)) {
 			return value.length > 0 ? value.join(", ") : "None";
 		}
-		if (typeof value === "object") {
-			return JSON.stringify(value);
+		if (
+			typeof value === "string" ||
+			typeof value === "number" ||
+			typeof value === "bigint" ||
+			typeof value === "symbol"
+		) {
+			return String(value);
 		}
-		// At this point, value is a primitive (string, number, bigint, symbol)
-		return String(value as string | number | bigint | symbol);
+		return JSON.stringify(value);
 	};
 
 	return (

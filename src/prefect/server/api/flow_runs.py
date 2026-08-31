@@ -2,25 +2,29 @@
 Routes for interacting with flow run objects.
 """
 
+import asyncio
 import csv
 import datetime
 import io
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from urllib.parse import quote
 from uuid import UUID
 
 import orjson
 import sqlalchemy as sa
+from docket import Depends as DocketDepends
+from docket import Docket, Retry
 from fastapi import (
-    BackgroundTasks,
     Body,
     Depends,
     HTTPException,
     Path,
     Query,
+    Request,
     Response,
 )
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import ORJSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 import prefect.server.api.dependencies as dependencies
@@ -44,8 +48,14 @@ from prefect.server.orchestration.policies import (
 )
 from prefect.server.schemas.graph import Graph
 from prefect.server.schemas.responses import (
+    FlowRunBulkDeleteResponse,
+    FlowRunBulkSetStateResponse,
+    FlowRunOrchestrationResult,
     FlowRunPaginationResponse,
     OrchestrationResult,
+)
+from prefect.server.services.cancellation_cleanup import (
+    maybe_schedule_cancelling_timeout_check_for_state,
 )
 from prefect.server.utilities.server import PrefectRouter
 from prefect.types import DateTime
@@ -60,9 +70,41 @@ logger: "logging.Logger" = get_logger("server.api")
 router: PrefectRouter = PrefectRouter(prefix="/flow_runs", tags=["Flow Runs"])
 
 
+def _get_request_docket(request: Request) -> Docket | None:
+    return getattr(request.app.state, "docket", None)
+
+
+async def _maybe_schedule_cancelling_timeout_check_for_state(
+    *,
+    request: Request,
+    flow_run_id: UUID,
+    state: schemas.states.State | None,
+) -> None:
+    docket = _get_request_docket(request)
+    if docket is None:
+        return
+
+    try:
+        await maybe_schedule_cancelling_timeout_check_for_state(
+            docket=docket,
+            flow_run_id=flow_run_id,
+            state=state,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to schedule CANCELLING timeout check; allowing accepted "
+            "state transition to proceed",
+            extra={
+                "flow_run_id": str(flow_run_id),
+                "flow_run_state_id": str(state.id) if state and state.id else None,
+            },
+        )
+
+
 @router.post("/")
 async def create_flow_run(
     flow_run: schemas.actions.FlowRunCreate,
+    request: Request,
     db: PrefectDBInterface = Depends(provide_database_interface),
     response: Response = None,  # type: ignore
     created_by: Optional[schemas.core.CreatedBy] = Depends(dependencies.get_created_by),
@@ -118,12 +160,26 @@ async def create_flow_run(
             flow_run=flow_run_object,
             orchestration_parameters=orchestration_parameters,
         )
-        if model.created >= right_now:
-            response.status_code = status.HTTP_201_CREATED
-
-        return schemas.responses.FlowRunResponse.model_validate(
+        created = model.created >= right_now
+        timeout_check_state = (
+            schemas.states.State.from_orm_without_result(model.state)
+            if created and model.state
+            else None
+        )
+        flow_run_id = model.id
+        flow_run_response = schemas.responses.FlowRunResponse.model_validate(
             model, from_attributes=True
         )
+
+    await _maybe_schedule_cancelling_timeout_check_for_state(
+        request=request,
+        flow_run_id=flow_run_id,
+        state=timeout_check_state,
+    )
+    if created:
+        response.status_code = status.HTTP_201_CREATED
+
+    return flow_run_response
 
 
 @router.patch("/{id:uuid}", status_code=status.HTTP_204_NO_CONTENT)
@@ -272,13 +328,12 @@ async def flow_run_history(
     history_end: DateTime = Body(..., description="The history's end time."),
     # Workaround for the fact that FastAPI does not let us configure ser_json_timedelta
     # to represent timedeltas as floats in JSON.
-    history_interval: float = Body(
+    history_interval_seconds: float = Body(
         ...,
         description=(
             "The size of each history interval, in seconds. Must be at least 1 second."
         ),
         json_schema_extra={"format": "time-delta"},
-        alias="history_interval_seconds",
     ),
     flows: Optional[schemas.filters.FlowFilter] = None,
     flow_runs: Optional[schemas.filters.FlowRunFilter] = None,
@@ -291,10 +346,8 @@ async def flow_run_history(
     """
     Query for flow run history data across a given range and interval.
     """
-    if isinstance(history_interval, float):
-        history_interval = datetime.timedelta(seconds=history_interval)
+    history_interval = datetime.timedelta(seconds=history_interval_seconds)
 
-    assert isinstance(history_interval, datetime.timedelta)
     if history_interval < datetime.timedelta(seconds=1):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -529,7 +582,7 @@ async def resume_flow_run(
         return orchestration_result
 
 
-@router.post("/filter", response_class=ORJSONResponse)
+@router.post("/filter")
 async def read_flow_runs(
     sort: schemas.sorting.FlowRunSort = Body(schemas.sorting.FlowRunSort.ID_DESC),
     limit: int = dependencies.LimitBody(),
@@ -569,12 +622,15 @@ async def read_flow_runs(
             ).model_dump(mode="json")
             for fr in db_flow_runs
         ]
-        return ORJSONResponse(content=encoded)
+        return Response(
+            content=orjson.dumps(encoded),
+            media_type="application/json",
+        )
 
 
 @router.delete("/{id:uuid}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_flow_run(
-    background_tasks: BackgroundTasks,
+    docket: dependencies.Docket,
     flow_run_id: UUID = Path(..., description="The flow run id", alias="id"),
     db: PrefectDBInterface = Depends(provide_database_interface),
 ) -> None:
@@ -589,10 +645,18 @@ async def delete_flow_run(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Flow run not found"
         )
-    background_tasks.add_task(delete_flow_run_logs, db, flow_run_id)
+    await docket.add(
+        delete_flow_run_logs,
+        key=f"delete_flow_run_logs:{flow_run_id}",
+    )(flow_run_id=flow_run_id)
 
 
-async def delete_flow_run_logs(db: PrefectDBInterface, flow_run_id: UUID) -> None:
+async def delete_flow_run_logs(
+    *,
+    db: PrefectDBInterface = DocketDepends(provide_database_interface),
+    flow_run_id: UUID,
+    retry: Retry = Retry(attempts=5, delay=datetime.timedelta(seconds=0.5)),
+) -> None:
     async with db.session_context(begin_transaction=True) as session:
         await models.logs.delete_logs(
             session=session,
@@ -602,9 +666,161 @@ async def delete_flow_run_logs(db: PrefectDBInterface, flow_run_id: UUID) -> Non
         )
 
 
+BULK_OPERATION_LIMIT = 50
+
+
+@router.post("/bulk_delete")
+async def bulk_delete_flow_runs(
+    docket: dependencies.Docket,
+    flow_runs: Optional[schemas.filters.FlowRunFilter] = Body(
+        None, description="Filter criteria for flow runs to delete"
+    ),
+    limit: int = Body(
+        BULK_OPERATION_LIMIT,
+        ge=1,
+        le=BULK_OPERATION_LIMIT,
+        description=f"Maximum number of flow runs to delete. Defaults to {BULK_OPERATION_LIMIT}.",
+    ),
+    db: PrefectDBInterface = Depends(provide_database_interface),
+) -> FlowRunBulkDeleteResponse:
+    """
+    Bulk delete flow runs matching the specified filter criteria.
+
+    Returns the IDs of flow runs that were deleted.
+    """
+    async with db.session_context(begin_transaction=True) as session:
+        # Query matching flow runs
+        db_flow_runs = await models.flow_runs.read_flow_runs(
+            session=session,
+            flow_run_filter=flow_runs,
+            limit=limit,
+        )
+
+        if not db_flow_runs:
+            return FlowRunBulkDeleteResponse(deleted=[])
+
+        flow_run_ids = [fr.id for fr in db_flow_runs]
+
+        # Delete flow runs
+        deleted_ids = await models.flow_runs.delete_flow_runs(
+            session=session,
+            flow_run_ids=flow_run_ids,
+        )
+
+    # Queue log cleanup for each deleted flow run
+    for flow_run_id in deleted_ids:
+        await docket.add(
+            delete_flow_run_logs,
+            key=f"delete_flow_run_logs:{flow_run_id}",
+        )(flow_run_id=flow_run_id)
+
+    return FlowRunBulkDeleteResponse(deleted=deleted_ids)
+
+
+@router.post("/bulk_set_state")
+async def bulk_set_flow_run_state(
+    request: Request,
+    flow_runs: Optional[schemas.filters.FlowRunFilter] = Body(
+        None, description="Filter criteria for flow runs to update"
+    ),
+    state: schemas.actions.StateCreate = Body(..., description="The state to set"),
+    force: bool = Body(
+        False,
+        description=(
+            "If false, orchestration rules will be applied that may alter or prevent"
+            " the state transition. If True, orchestration rules are not applied."
+        ),
+    ),
+    limit: int = Body(
+        BULK_OPERATION_LIMIT,
+        ge=1,
+        le=BULK_OPERATION_LIMIT,
+        description=f"Maximum number of flow runs to update. Defaults to {BULK_OPERATION_LIMIT}.",
+    ),
+    db: PrefectDBInterface = Depends(provide_database_interface),
+    flow_policy: type[FlowRunOrchestrationPolicy] = Depends(
+        orchestration_dependencies.provide_flow_policy
+    ),
+    orchestration_parameters: Dict[str, Any] = Depends(
+        orchestration_dependencies.provide_flow_orchestration_parameters
+    ),
+    api_version: str = Depends(dependencies.provide_request_api_version),
+    client_version: Optional[str] = Depends(dependencies.get_prefect_client_version),
+) -> FlowRunBulkSetStateResponse:
+    """
+    Bulk set state for flow runs matching the specified filter criteria.
+
+    Returns the orchestration results for each flow run.
+    """
+    orchestration_parameters.update({"api-version": api_version})
+
+    async with db.session_context() as session:
+        # Query matching flow runs
+        db_flow_runs = await models.flow_runs.read_flow_runs(
+            session=session,
+            flow_run_filter=flow_runs,
+            limit=limit,
+        )
+
+    if not db_flow_runs:
+        return FlowRunBulkSetStateResponse(results=[])
+
+    results: List[FlowRunOrchestrationResult] = []
+
+    # Process flow runs sequentially to avoid session conflicts
+    for flow_run in db_flow_runs:
+        state_to_schedule: schemas.states.State | None = None
+        async with db.session_context(
+            begin_transaction=True, with_for_update=True
+        ) as session:
+            try:
+                orchestration_result = await models.flow_runs.set_flow_run_state(
+                    session=session,
+                    flow_run_id=flow_run.id,
+                    state=schemas.states.State.model_validate(state),
+                    force=force,
+                    flow_policy=flow_policy,
+                    orchestration_parameters=orchestration_parameters,
+                    client_version=client_version,
+                )
+                results.append(
+                    FlowRunOrchestrationResult(
+                        flow_run_id=flow_run.id,
+                        status=orchestration_result.status,
+                        state=orchestration_result.state,
+                        details=orchestration_result.details,
+                    )
+                )
+                if (
+                    orchestration_result.status
+                    == schemas.responses.SetStateStatus.ACCEPT
+                ):
+                    state_to_schedule = orchestration_result.state
+            except Exception as e:
+                results.append(
+                    FlowRunOrchestrationResult(
+                        flow_run_id=flow_run.id,
+                        status=schemas.responses.SetStateStatus.ABORT,
+                        state=None,
+                        details=schemas.responses.StateAbortDetails(reason=str(e)),
+                    )
+                )
+                continue
+
+        if state_to_schedule is not None:
+            await _maybe_schedule_cancelling_timeout_check_for_state(
+                request=request,
+                flow_run_id=flow_run.id,
+                state=state_to_schedule,
+            )
+
+    return FlowRunBulkSetStateResponse(results=results)
+
+
 @router.post("/{id:uuid}/set_state")
 async def set_flow_run_state(
     response: Response,
+    request: Request,
     flow_run_id: UUID = Path(..., description="The flow run id", alias="id"),
     state: schemas.actions.StateCreate = Body(..., description="The intended state."),
     force: bool = Body(
@@ -644,6 +860,13 @@ async def set_flow_run_state(
             flow_policy=flow_policy,
             orchestration_parameters=orchestration_parameters,
             client_version=client_version,
+        )
+
+    if orchestration_result.status == schemas.responses.SetStateStatus.ACCEPT:
+        await _maybe_schedule_cancelling_timeout_check_for_state(
+            request=request,
+            flow_run_id=flow_run_id,
+            state=orchestration_result.state,
         )
 
     # set the 201 if a new state was created
@@ -761,7 +984,7 @@ async def delete_flow_run_input(
             )
 
 
-@router.post("/paginate", response_class=ORJSONResponse)
+@router.post("/paginate")
 async def paginate_flow_runs(
     sort: schemas.sorting.FlowRunSort = Body(schemas.sorting.FlowRunSort.ID_DESC),
     limit: int = dependencies.LimitBody(),
@@ -779,50 +1002,56 @@ async def paginate_flow_runs(
     """
     offset = (page - 1) * limit
 
-    async with db.session_context() as session:
-        runs = await models.flow_runs.read_flow_runs(
-            session=session,
-            flow_filter=flows,
-            flow_run_filter=flow_runs,
-            task_run_filter=task_runs,
-            deployment_filter=deployments,
-            work_pool_filter=work_pools,
-            work_queue_filter=work_pool_queues,
-            offset=offset,
-            limit=limit,
-            sort=sort,
-        )
+    async def get_runs():
+        async with db.session_context() as session:
+            return await models.flow_runs.read_flow_runs(
+                session=session,
+                flow_filter=flows,
+                flow_run_filter=flow_runs,
+                task_run_filter=task_runs,
+                deployment_filter=deployments,
+                work_pool_filter=work_pools,
+                work_queue_filter=work_pool_queues,
+                offset=offset,
+                limit=limit,
+                sort=sort,
+            )
 
-        count = await models.flow_runs.count_flow_runs(
-            session=session,
-            flow_filter=flows,
-            flow_run_filter=flow_runs,
-            task_run_filter=task_runs,
-            deployment_filter=deployments,
-            work_pool_filter=work_pools,
-            work_queue_filter=work_pool_queues,
-        )
+    async def get_count():
+        async with db.session_context() as session:
+            return await models.flow_runs.count_flow_runs(
+                session=session,
+                flow_filter=flows,
+                flow_run_filter=flow_runs,
+                task_run_filter=task_runs,
+                deployment_filter=deployments,
+                work_pool_filter=work_pools,
+                work_queue_filter=work_pool_queues,
+            )
 
-        # Instead of relying on fastapi.encoders.jsonable_encoder to convert the
-        # response to JSON, we do so more efficiently ourselves.
-        # In particular, the FastAPI encoder is very slow for large, nested objects.
-        # See: https://github.com/tiangolo/fastapi/issues/1224
-        results = [
-            schemas.responses.FlowRunResponse.model_validate(
-                run, from_attributes=True
-            ).model_dump(mode="json")
-            for run in runs
-        ]
+    runs, count = await asyncio.gather(get_runs(), get_count())
 
-        response = FlowRunPaginationResponse(
-            results=results,
-            count=count,
-            limit=limit,
-            pages=(count + limit - 1) // limit,
-            page=page,
-        ).model_dump(mode="json")
+    # Instead of relying on fastapi.encoders.jsonable_encoder to convert the
+    # response to JSON, we do so more efficiently ourselves.
+    # In particular, the FastAPI encoder is very slow for large, nested objects.
+    # See: https://github.com/tiangolo/fastapi/issues/1224
+    results = [
+        schemas.responses.FlowRunResponse.model_validate(run, from_attributes=True)
+        for run in runs
+    ]
 
-        return ORJSONResponse(content=response)
+    response = FlowRunPaginationResponse(
+        results=results,
+        count=count,
+        limit=limit,
+        pages=(count + limit - 1) // limit if limit > 0 else 0,
+        page=page,
+    ).model_dump(mode="json")
+
+    return Response(
+        content=orjson.dumps(response),
+        media_type="application/json",
+    )
 
 
 FLOW_RUN_LOGS_DOWNLOAD_PAGE_LIMIT = 1000
@@ -844,16 +1073,25 @@ async def download_logs(
         if not flow_run:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Flow run not found")
 
-        async def generate():
-            data = io.StringIO()
-            csv_writer = csv.writer(data)
-            csv_writer.writerow(
-                ["timestamp", "level", "flow_run_id", "task_run_id", "message"]
-            )
+        filename = quote(f"{flow_run.name}-logs.csv", safe="")
 
-            offset = 0
-            limit = FLOW_RUN_LOGS_DOWNLOAD_PAGE_LIMIT
+    async def generate():
 
+        data = io.StringIO()
+        csv_writer = csv.writer(data)
+
+        csv_writer.writerow(
+            ["timestamp", "level", "flow_run_id", "task_run_id", "message"]
+        )
+        data.seek(0)
+        yield data.read()
+        data.seek(0)
+        data.truncate(0)
+
+        offset = 0
+        limit = FLOW_RUN_LOGS_DOWNLOAD_PAGE_LIMIT
+
+        async with db.session_context() as session:
             while True:
                 results = await models.logs.read_logs(
                     session=session,
@@ -885,13 +1123,15 @@ async def download_logs(
                     data.seek(0)
                     data.truncate(0)
 
-        return StreamingResponse(
-            generate(),
-            media_type="text/csv",
-            headers={
-                "Content-Disposition": f"attachment; filename={flow_run.name}-logs.csv"
-            },
-        )
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"flow-run-logs.csv\"; filename*=UTF-8''{filename}"
+            )
+        },
+    )
 
 
 @router.patch("/{id:uuid}/labels", status_code=status.HTTP_204_NO_CONTENT)

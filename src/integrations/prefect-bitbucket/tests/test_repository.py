@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Set, Tuple
+from typing import Coroutine, Set, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -180,6 +180,36 @@ class TestBitBucketRepository:
         ]
         assert mock.await_args[0][0][: len(expected_cmd)] == expected_cmd
 
+    async def test_get_directory_redacts_token_in_clone_error(self, monkeypatch):
+        class p:
+            returncode = 1
+
+        async def mock(cmd, stream_output=None, **kwargs):
+            if stream_output:
+                _, err_stream = stream_output
+                err_stream.write(
+                    "fatal: Authentication failed for "
+                    "'https://dev:p@ss:word#1@bitbucket.org/PrefectHQ/prefect.git/'"
+                    "\nremote: token p@ss:word#1 rejected"
+                )
+            return p()
+
+        monkeypatch.setattr(prefect_bitbucket.repository, "run_process", mock)
+
+        b = BitBucketRepository(
+            repository="https://bitbucket.org/PrefectHQ/prefect.git",
+            bitbucket_credentials=BitBucketCredentials(
+                token="p@ss:word#1", username="dev"
+            ),
+        )
+
+        with pytest.raises(OSError) as exc_info:
+            await b.get_directory()
+
+        message = str(exc_info.value)
+        assert "dev:p@ss:word#1" not in message
+        assert "https://bitbucket.org/PrefectHQ/prefect.git/" in message
+
     async def test_ssh_fails_with_credential(self, monkeypatch):
         """Ensure that credentials cannot be passed in if the URL is not in the HTTPS
         format.
@@ -292,3 +322,72 @@ class TestBitBucketRepository:
             url
             == "https://devops.team%2Bci%40scalefocus.com:p%40ss%3Aword%231@bitbucket.org/my-team/my-repo.git"
         )
+
+    def test_create_repo_url_escapes_forward_slash_in_token(self):
+        """Regression test for issue #19419: tokens with forward slashes must be URL-encoded.
+
+        Bitbucket access tokens can contain forward slashes (base64 encoding uses them).
+        These must be encoded as %2F to avoid being interpreted as path separators.
+        """
+        credentials = BitBucketCredentials(
+            username="x-token-auth", token="abc123/def456/ghi789"
+        )
+
+        block = BitBucketRepository(
+            repository="https://bitbucket.org/my-team/my-repo.git",
+            bitbucket_credentials=credentials,
+        )
+
+        url = block._create_repo_url()
+        # forward slashes should be encoded as %2F
+        assert (
+            url
+            == "https://x-token-auth:abc123%2Fdef456%2Fghi789@bitbucket.org/my-team/my-repo.git"
+        )
+        # ensure raw slashes don't appear in the credentials portion
+        credentials_part = url.split("@")[0].split("//")[1]
+        assert "/" not in credentials_part.split(":")[1], (
+            "token should not contain unencoded slashes"
+        )
+
+
+class TestBitBucketRepositoryAsyncDispatch:
+    """Tests for BitBucketRepository.get_directory migrated from @sync_compatible to @async_dispatch.
+
+    These tests verify the critical behavior from issue #15008 where
+    @sync_compatible would incorrectly return coroutines in sync context.
+    """
+
+    def test_get_directory_sync_context_returns_none_not_coroutine(self, monkeypatch):
+        """get_directory must return None (not coroutine) in sync context.
+
+        This is the critical regression test for issues #14712 and #14625.
+        """
+        import subprocess
+        from unittest.mock import MagicMock
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        monkeypatch.setattr(subprocess, "run", MagicMock(return_value=mock_result))
+
+        b = BitBucketRepository(repository="prefect")
+        result = b.get_directory()
+
+        assert not isinstance(result, Coroutine), "sync context returned coroutine"
+        assert result is None
+
+    async def test_get_directory_async_context_returns_coroutine(self, monkeypatch):
+        """get_directory should dispatch to async and return coroutine in async context."""
+
+        class p:
+            returncode = 0
+
+        mock = AsyncMock(return_value=p())
+        monkeypatch.setattr(prefect_bitbucket.repository, "run_process", mock)
+
+        b = BitBucketRepository(repository="prefect")
+        result = b.get_directory()
+
+        assert isinstance(result, Coroutine)
+        await result  # should complete without error

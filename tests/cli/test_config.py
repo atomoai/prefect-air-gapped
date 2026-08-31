@@ -1,19 +1,22 @@
+import json
+import os
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import toml
-from typer import Exit
 
 import prefect.context
 import prefect.settings
 from prefect.context import use_profile
 from prefect.settings import (
-    PREFECT_API_DATABASE_TIMEOUT,
     PREFECT_API_KEY,
     PREFECT_CLIENT_RETRY_EXTRA_CODES,
     PREFECT_LOGGING_TO_API_MAX_LOG_SIZE,
     PREFECT_PROFILES_PATH,
-    PREFECT_SERVER_ALLOW_EPHEMERAL_MODE,
+    PREFECT_SERVER_DATABASE_TIMEOUT,
+    PREFECT_SERVER_EPHEMERAL_ENABLED,
     PREFECT_TEST_SETTING,
     Profile,
     ProfilesCollection,
@@ -36,7 +39,7 @@ FROM_PYPROJECT_TOML = "(from pyproject.toml)"
 
 @pytest.fixture(autouse=True)
 def interactive_console(monkeypatch):
-    monkeypatch.setattr("prefect.cli.config.is_interactive", lambda: True)
+    monkeypatch.setattr("prefect.cli._app.is_interactive", lambda: True)
 
     # `readchar` does not like the fake stdin provided by typer isolation so we provide
     # a version that does not require a fd to be attached
@@ -45,7 +48,7 @@ def interactive_console(monkeypatch):
         position = sys.stdin.tell()
         if not sys.stdin.read():
             print("TEST ERROR: CLI is attempting to read input but stdin is empty.")
-            raise Exit(-2)
+            raise SystemExit(-2)
         else:
             sys.stdin.seek(position)
         return sys.stdin.read(1)
@@ -74,8 +77,62 @@ def test_set_using_default_profile():
     assert "ephemeral" in profiles
     assert profiles["ephemeral"].settings == {
         PREFECT_TEST_SETTING: "DEBUG",
-        PREFECT_SERVER_ALLOW_EPHEMERAL_MODE: "true",
+        PREFECT_SERVER_EPHEMERAL_ENABLED: "true",
     }
+
+
+def test_set_legacy_alias_overrides_canonical_default_in_profile():
+    with use_profile("ephemeral"):
+        invoke_and_assert(
+            ["config", "set", "PREFECT_SERVER_ALLOW_EPHEMERAL_MODE=false"],
+            expected_output="""
+                Set 'PREFECT_SERVER_ALLOW_EPHEMERAL_MODE' to 'false'.
+                Updated profile 'ephemeral'.
+                """,
+        )
+
+    profiles = load_profiles()
+    assert "ephemeral" in profiles
+    assert profiles["ephemeral"].settings == {
+        PREFECT_SERVER_EPHEMERAL_ENABLED: "false",
+    }
+    env_vars = profiles["ephemeral"].to_environment_variables()
+    assert "PREFECT_SERVER_ALLOW_EPHEMERAL_MODE" not in env_vars
+    assert env_vars.get("PREFECT_SERVER_EPHEMERAL_ENABLED") == "false"
+
+
+@pytest.mark.parametrize(
+    "profile_settings",
+    [
+        'PREFECT_SERVER_DATABASE_TIMEOUT = "99"\nPREFECT_API_DATABASE_TIMEOUT = "42"\n',
+        'PREFECT_API_DATABASE_TIMEOUT = "42"\nPREFECT_SERVER_DATABASE_TIMEOUT = "99"\n',
+    ],
+)
+def test_validate_preserves_canonical_value_when_alias_present_in_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    temporary_profiles_path: Path,
+    profile_settings: str,
+):
+    """Canonical setting values take precedence over legacy aliases in profiles."""
+    for key in list(os.environ):
+        if key.startswith("PREFECT_"):
+            monkeypatch.delenv(key, raising=False)
+
+    temporary_profiles_path.write_text(
+        f'active = "foo"\n\n[profiles.foo]\n{profile_settings}'
+    )
+
+    with prefect.context.use_profile("foo"):
+        result = invoke_and_assert(["config", "validate"])
+
+    assert result.exit_code == 0
+    assert "Configuration valid!" in result.stdout
+
+    profiles = load_profiles(include_defaults=False)
+    assert profiles["foo"].settings == {PREFECT_SERVER_DATABASE_TIMEOUT: "99"}
+    assert (
+        "PREFECT_API_DATABASE_TIMEOUT" not in profiles["foo"].to_environment_variables()
+    )
 
 
 def test_set_using_profile_flag():
@@ -123,13 +180,13 @@ def test_set_with_invalid_value_type():
     save_profiles(ProfilesCollection([Profile(name="foo", settings={})], active=None))
 
     invoke_and_assert(
-        ["--profile", "foo", "config", "set", "PREFECT_API_DATABASE_TIMEOUT=HELLO"],
+        ["--profile", "foo", "config", "set", "PREFECT_SERVER_DATABASE_TIMEOUT=HELLO"],
         expected_output_contains="Input should be a valid number",
         expected_code=1,
     )
 
     profiles = load_profiles()
-    assert PREFECT_API_DATABASE_TIMEOUT not in profiles["foo"].settings, (
+    assert PREFECT_SERVER_DATABASE_TIMEOUT not in profiles["foo"].settings, (
         "The setting should not be saved"
     )
 
@@ -343,13 +400,13 @@ def test_view_excludes_unset_settings_without_show_defaults_flag(monkeypatch):
     for key in _get_valid_setting_names(prefect.settings.Settings):
         monkeypatch.delenv(key, raising=False)
 
-    monkeypatch.setenv("PREFECT_API_DATABASE_CONNECTION_TIMEOUT", "2.5")
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
 
     with prefect.context.use_profile(
         prefect.settings.Profile(
             name="foo",
             settings={
-                PREFECT_API_DATABASE_TIMEOUT: 2.0,
+                PREFECT_SERVER_DATABASE_TIMEOUT: 2.0,
                 PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 1000001,
             },
         ),
@@ -365,6 +422,70 @@ def test_view_excludes_unset_settings_without_show_defaults_flag(monkeypatch):
 
     assert len(expected) < len(_get_valid_setting_names(prefect.settings.Settings)), (
         "All settings were not expected; we should only have a subset."
+    )
+
+
+def test_view_json_output(monkeypatch):
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
+
+    with prefect.context.use_profile(
+        prefect.settings.Profile(
+            name="foo",
+            settings={
+                PREFECT_SERVER_DATABASE_TIMEOUT: 2.0,
+                PREFECT_API_KEY: "secret-api-key",
+            },
+        ),
+        include_current_context=False,
+    ):
+        result = invoke_and_assert(
+            ["config", "view", "--output", "json"],
+            expected_code=0,
+        )
+
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "foo"
+    assert isinstance(payload["settings"], list)
+    by_name = {setting["name"]: setting for setting in payload["settings"]}
+    assert by_name["PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT"]["source"] == "env"
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["source"] == "profile"
+    assert by_name["PREFECT_API_KEY"]["value"] == "********"
+
+
+def test_view_json_output_short_flag(monkeypatch):
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
+
+    result = invoke_and_assert(
+        ["config", "view", "-o", "json"],
+        expected_code=0,
+    )
+
+    payload = json.loads(result.stdout)
+    assert isinstance(payload["settings"], list)
+    assert any(
+        setting["name"] == "PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT"
+        for setting in payload["settings"]
+    )
+
+
+def test_view_json_output_hide_sources(monkeypatch):
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
+
+    result = invoke_and_assert(
+        ["config", "view", "--output", "json", "--hide-sources"],
+        expected_code=0,
+    )
+
+    payload = json.loads(result.stdout)
+    assert isinstance(payload["settings"], list)
+    assert all("source" not in setting for setting in payload["settings"])
+
+
+def test_view_invalid_output_format():
+    invoke_and_assert(
+        ["config", "view", "--output", "xml"],
+        expected_code=1,
+        expected_output="Only 'json' output format is supported.",
     )
 
 
@@ -413,13 +534,13 @@ def test_view_includes_unset_settings_with_show_defaults():
     ids=["default", "show-sources", "show-defaults"],
 )
 def test_view_shows_setting_sources(monkeypatch, command):
-    monkeypatch.setenv("PREFECT_API_DATABASE_CONNECTION_TIMEOUT", "2.5")
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
 
     with prefect.context.use_profile(
         prefect.settings.Profile(
             name="foo",
             settings={
-                PREFECT_API_DATABASE_TIMEOUT: 2.0,
+                PREFECT_SERVER_DATABASE_TIMEOUT: 2.0,
                 PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 1000001,
             },
         )
@@ -439,14 +560,14 @@ def test_view_shows_setting_sources(monkeypatch, command):
         )
 
     # Assert that sources are correct
-    assert f"PREFECT_API_DATABASE_TIMEOUT='2.0' {FROM_PROFILE}" in lines
+    assert f"PREFECT_SERVER_DATABASE_TIMEOUT='2.0' {FROM_PROFILE}" in lines
     assert f"PREFECT_LOGGING_TO_API_MAX_LOG_SIZE='1000001' {FROM_PROFILE}" in lines
-    assert f"PREFECT_API_DATABASE_CONNECTION_TIMEOUT='2.5' {FROM_ENV}" in lines
+    assert f"PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT='2.5' {FROM_ENV}" in lines
 
     if "--show-defaults" in command:
         # Check that defaults sources are correct by checking an unset setting
         assert (
-            f"PREFECT_API_SERVICES_SCHEDULER_LOOP_SECONDS='60.0' {FROM_DEFAULT}"
+            f"PREFECT_SERVER_SERVICES_SCHEDULER_LOOP_SECONDS='60.0' {FROM_DEFAULT}"
             in lines
         )
 
@@ -459,13 +580,13 @@ def test_view_shows_setting_sources(monkeypatch, command):
     ],
 )
 def test_view_with_hide_sources_excludes_sources(monkeypatch, command):
-    monkeypatch.setenv("PREFECT_API_DATABASE_CONNECTION_TIMEOUT", "2.5")
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT", "2.5")
 
     with prefect.context.use_profile(
         prefect.settings.Profile(
             name="foo",
             settings={
-                PREFECT_API_DATABASE_TIMEOUT: 2.0,
+                PREFECT_SERVER_DATABASE_TIMEOUT: 2.0,
                 PREFECT_LOGGING_TO_API_MAX_LOG_SIZE: 1000001,
             },
         ),
@@ -481,13 +602,13 @@ def test_view_with_hide_sources_excludes_sources(monkeypatch, command):
         ), f"Source included in line: {line}"
 
     # Ensure that the settings that we know are set are still included
-    assert "PREFECT_API_DATABASE_TIMEOUT='2.0'" in lines
+    assert "PREFECT_SERVER_DATABASE_TIMEOUT='2.0'" in lines
     assert "PREFECT_LOGGING_TO_API_MAX_LOG_SIZE='1000001'" in lines
-    assert "PREFECT_API_DATABASE_CONNECTION_TIMEOUT='2.5'" in lines
+    assert "PREFECT_SERVER_DATABASE_CONNECTION_TIMEOUT='2.5'" in lines
 
     if "--show-defaults" in command:
         # Check that defaults are included correctly by checking an unset setting
-        assert "PREFECT_API_SERVICES_SCHEDULER_LOOP_SECONDS='60.0'" in lines
+        assert "PREFECT_SERVER_SERVICES_SCHEDULER_LOOP_SECONDS='60.0'" in lines
 
 
 @pytest.mark.parametrize(
@@ -499,7 +620,9 @@ def test_view_with_hide_sources_excludes_sources(monkeypatch, command):
     ],
 )
 def test_view_obfuscates_secrets(monkeypatch, command):
-    monkeypatch.setenv("PREFECT_API_DATABASE_CONNECTION_URL", "secret-connection-url")
+    monkeypatch.setenv(
+        "PREFECT_SERVER_DATABASE_CONNECTION_URL", "secret-connection-url"
+    )
 
     with prefect.context.use_profile(
         prefect.settings.Profile(
@@ -511,11 +634,11 @@ def test_view_obfuscates_secrets(monkeypatch, command):
         res = invoke_and_assert(command)
 
     lines = res.stdout.splitlines()
-    assert f"PREFECT_API_DATABASE_CONNECTION_URL='********' {FROM_ENV}" in lines
+    assert f"PREFECT_SERVER_DATABASE_CONNECTION_URL='********' {FROM_ENV}" in lines
     assert f"PREFECT_API_KEY='********' {FROM_PROFILE}" in lines
 
     if "--show-defaults" in command:
-        assert f"PREFECT_API_DATABASE_PASSWORD='********' {FROM_DEFAULT}" in lines
+        assert f"PREFECT_SERVER_DATABASE_PASSWORD='********' {FROM_DEFAULT}" in lines
 
     assert "secret-" not in res.stdout
 
@@ -528,7 +651,9 @@ def test_view_obfuscates_secrets(monkeypatch, command):
     ],
 )
 def test_view_shows_secrets(monkeypatch, command):
-    monkeypatch.setenv("PREFECT_API_DATABASE_CONNECTION_URL", "secret-connection-url")
+    monkeypatch.setenv(
+        "PREFECT_SERVER_DATABASE_CONNECTION_URL", "secret-connection-url"
+    )
 
     with prefect.context.use_profile(
         prefect.settings.Profile(
@@ -542,13 +667,22 @@ def test_view_shows_secrets(monkeypatch, command):
     lines = res.stdout.splitlines()
 
     assert (
-        f"PREFECT_API_DATABASE_CONNECTION_URL='secret-connection-url' {FROM_ENV}"
+        f"PREFECT_SERVER_DATABASE_CONNECTION_URL='secret-connection-url' {FROM_ENV}"
         in lines
     )
     assert f"PREFECT_API_KEY='secret-api-key' {FROM_PROFILE}" in lines
 
     if "--show-defaults" in command:
-        assert f"PREFECT_API_DATABASE_PASSWORD='None' {FROM_DEFAULT}" in lines
+        assert f"PREFECT_SERVER_DATABASE_PASSWORD='None' {FROM_DEFAULT}" in lines
+
+
+def test_view_with_env_file_fifo_does_not_hang(tmp_path):
+    """Regression test for https://github.com/PrefectHQ/prefect/issues/21319"""
+    with tmpchdir(tmp_path):
+        os.mkfifo(".env")
+        res = invoke_and_assert(["config", "view"])
+
+    assert FROM_DOT_ENV not in res.stdout
 
 
 def test_view_with_env_file(tmp_path):
@@ -681,3 +815,120 @@ def test_view_with_pyproject_toml_file_and_profile(tmp_path):
 
         assert "PREFECT_CLIENT_RETRY_EXTRA_CODES='300'" in res.stdout
         assert FROM_PYPROJECT_TOML in res.stdout
+
+
+def test_view_prefers_canonical_env_var_over_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    monkeypatch.setenv("PREFECT_SERVER_DATABASE_TIMEOUT", "99")
+    monkeypatch.setenv("PREFECT_API_DATABASE_TIMEOUT", "42")
+
+    with tmpchdir(tmp_path):
+        with prefect.context.use_profile(
+            prefect.settings.Profile(name="foo", settings={}),
+            include_current_context=False,
+        ):
+            result = invoke_and_assert(["config", "view", "--output", "json"])
+
+    payload = json.loads(result.stdout)
+    by_name = {setting["name"]: setting for setting in payload["settings"]}
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["value"] == "99"
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["source"] == "env"
+    assert "PREFECT_API_DATABASE_TIMEOUT" not in by_name
+
+
+def test_view_prefers_canonical_dot_env_value_over_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    for key in list(os.environ):
+        if key.startswith("PREFECT_"):
+            monkeypatch.delenv(key, raising=False)
+
+    with tmpchdir(tmp_path):
+        with open(".env", "w") as f:
+            f.write("PREFECT_SERVER_DATABASE_TIMEOUT=99\n")
+            f.write("PREFECT_API_DATABASE_TIMEOUT=42\n")
+
+        with prefect.context.use_profile(
+            prefect.settings.Profile(name="foo", settings={}),
+            include_current_context=False,
+        ):
+            result = invoke_and_assert(["config", "view", "--output", "json"])
+
+    payload = json.loads(result.stdout)
+    by_name = {setting["name"]: setting for setting in payload["settings"]}
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["value"] == "99"
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["source"] == ".env file"
+    assert "PREFECT_API_DATABASE_TIMEOUT" not in by_name
+
+
+def test_view_uses_alias_from_dot_env_when_canonical_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    for key in list(os.environ):
+        if key.startswith("PREFECT_"):
+            monkeypatch.delenv(key, raising=False)
+
+    with tmpchdir(tmp_path):
+        with open(".env", "w") as f:
+            f.write("PREFECT_API_DATABASE_TIMEOUT=42\n")
+
+        with prefect.context.use_profile(
+            prefect.settings.Profile(name="foo", settings={}),
+            include_current_context=False,
+        ):
+            result = invoke_and_assert(["config", "view", "--output", "json"])
+
+    payload = json.loads(result.stdout)
+    by_name = {setting["name"]: setting for setting in payload["settings"]}
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["value"] == "42"
+    assert by_name["PREFECT_SERVER_DATABASE_TIMEOUT"]["source"] == ".env file"
+
+
+def test_invalid_prefect_toml(tmp_path):
+    """Malformed prefect.toml produces a clean settings error, not a traceback."""
+    (tmp_path / "prefect.toml").write_text("[client\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "prefect", "config", "view"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "Failed to load Prefect settings from prefect.toml: invalid TOML" in output
+    assert "Failed to initialize plugins" not in output
+    assert "Traceback" not in output
+
+
+def test_invalid_pyproject_toml(tmp_path):
+    """Malformed pyproject.toml produces a clean settings error, not a traceback."""
+    (tmp_path / "pyproject.toml").write_text("[tool.prefect\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "prefect", "config", "view"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "Failed to load Prefect settings from pyproject.toml: invalid TOML" in output
+    assert "Failed to initialize plugins" not in output
+    assert "Traceback" not in output
+
+
+def test_version_with_invalid_toml(tmp_path):
+    """prefect --version still works even with malformed TOML in the CWD."""
+    (tmp_path / "prefect.toml").write_text("[client\n")
+    result = subprocess.run(
+        [sys.executable, "-m", "prefect", "--version"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip()
+    assert "Traceback" not in (result.stdout + result.stderr)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 import textwrap
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, Generator
@@ -12,6 +14,7 @@ from typing import Any, Callable, Generator
 import pydantic
 import pytest
 import toml
+from cachetools import TTLCache
 from pydantic_core import to_jsonable_python
 from sqlalchemy import make_url
 
@@ -24,6 +27,7 @@ from prefect.settings import (
     PREFECT_API_DATABASE_NAME,
     PREFECT_API_DATABASE_PASSWORD,
     PREFECT_API_DATABASE_PORT,
+    PREFECT_API_DATABASE_TIMEOUT,
     PREFECT_API_DATABASE_USER,
     PREFECT_API_KEY,
     PREFECT_API_URL,
@@ -41,6 +45,8 @@ from prefect.settings import (
     PREFECT_SERVER_API_HOST,
     PREFECT_SERVER_API_PORT,
     PREFECT_SERVER_DATABASE_CONNECTION_URL,
+    PREFECT_SERVER_DATABASE_TIMEOUT,
+    PREFECT_SERVER_EPHEMERAL_ENABLED,
     PREFECT_SERVER_LOGGING_LEVEL,
     PREFECT_TASK_DEFAULT_RETRY_DELAY_SECONDS,
     PREFECT_TEST_MODE,
@@ -48,6 +54,7 @@ from prefect.settings import (
     PREFECT_UI_API_URL,
     PREFECT_UI_URL,
     PREFECT_UNIT_TEST_MODE,
+    PREFECT_WORKER_DEBUG_MODE,
     Profile,
     ProfilesCollection,
     Settings,
@@ -73,15 +80,18 @@ from prefect.settings.models.api import APISettings
 from prefect.settings.models.client import ClientSettings
 from prefect.settings.models.logging import LoggingSettings
 from prefect.settings.models.results import ResultsSettings
+from prefect.settings.models.root import _get_settings_accessors
 from prefect.settings.models.server import ServerSettings
 from prefect.settings.models.server.api import ServerAPISettings
 from prefect.settings.models.server.database import (
     ServerDatabaseSettings,
     SQLAlchemySettings,
 )
+from prefect.settings.profiles import _cast_settings
 from prefect.settings.sources import (
     PrefectTomlConfigSettingsSource,
     PyprojectTomlConfigSettingsSource,
+    _read_toml_file,
 )
 from prefect.utilities.collections import get_from_dict, set_in_dict
 from prefect.utilities.filesystem import tmpchdir
@@ -127,6 +137,10 @@ SUPPORTED_SETTINGS = {
     },
     "PREFECT_API_SERVICES_EVENT_PERSISTER_BATCH_SIZE": {
         "test_value": 100,
+        "legacy": True,
+    },
+    "PREFECT_API_SERVICES_EVENT_PERSISTER_READ_BATCH_SIZE": {
+        "test_value": 10,
         "legacy": True,
     },
     "PREFECT_API_SERVICES_EVENT_PERSISTER_ENABLED": {
@@ -210,12 +224,14 @@ SUPPORTED_SETTINGS = {
     },
     "PREFECT_CLIENT_METRICS_PORT": {"test_value": 9000},
     "PREFECT_CLIENT_RETRY_EXTRA_CODES": {"test_value": {400, 300}},
+    "PREFECT_CLIENT_SERVER_VERSION_CHECK_ENABLED": {"test_value": False},
     "PREFECT_CLIENT_RETRY_JITTER_FACTOR": {"test_value": 0.5},
     "PREFECT_CLI_COLORS": {"test_value": True},
     "PREFECT_CLI_PROMPT": {"test_value": True},
     "PREFECT_CLI_WRAP_LINES": {"test_value": True},
     "PREFECT_CLOUD_API_URL": {"test_value": "https://cloud.prefect.io"},
     "PREFECT_CLOUD_ENABLE_ORCHESTRATION_TELEMETRY": {"test_value": True},
+    "PREFECT_CLOUD_MAX_LOG_SIZE": {"test_value": 25_000},
     "PREFECT_CLOUD_UI_URL": {"test_value": "https://cloud.prefect.io"},
     "PREFECT_DEBUG_MODE": {"test_value": True},
     "PREFECT_DEFAULT_DOCKER_BUILD_NAMESPACE": {"test_value": "prefect", "legacy": True},
@@ -251,20 +267,38 @@ SUPPORTED_SETTINGS = {
         "legacy": True,
     },
     "PREFECT_EVENTS_WEBSOCKET_BACKFILL_PAGE_SIZE": {"test_value": 10, "legacy": True},
+    "PREFECT_EVENTS_WORKER_MAX_QUEUE_SIZE": {"test_value": 5000},
     "PREFECT_EXPERIMENTAL_WARN": {"test_value": True, "legacy": True},
     "PREFECT_EXPERIMENTS_WARN": {"test_value": True},
     "PREFECT_EXPERIMENTS_PLUGINS_ALLOW": {
         "test_value": "plugin1,plugin2",
         "expected_value": {"plugin1", "plugin2"},
+        "legacy": True,
     },
     "PREFECT_EXPERIMENTS_PLUGINS_DENY": {
         "test_value": "plugin3",
         "expected_value": {"plugin3"},
+        "legacy": True,
     },
-    "PREFECT_EXPERIMENTS_PLUGINS_ENABLED": {"test_value": True},
-    "PREFECT_EXPERIMENTS_PLUGINS_SAFE_MODE": {"test_value": True},
-    "PREFECT_EXPERIMENTS_PLUGINS_SETUP_TIMEOUT_SECONDS": {"test_value": 30.0},
-    "PREFECT_EXPERIMENTS_PLUGINS_STRICT": {"test_value": True},
+    "PREFECT_EXPERIMENTS_PLUGINS_ENABLED": {"test_value": True, "legacy": True},
+    "PREFECT_EXPERIMENTS_PLUGINS_SAFE_MODE": {"test_value": True, "legacy": True},
+    "PREFECT_EXPERIMENTS_PLUGINS_SETUP_TIMEOUT_SECONDS": {
+        "test_value": 30.0,
+        "legacy": True,
+    },
+    "PREFECT_EXPERIMENTS_PLUGINS_STRICT": {"test_value": True, "legacy": True},
+    "PREFECT_PLUGINS_ALLOW": {
+        "test_value": "plugin1,plugin2",
+        "expected_value": {"plugin1", "plugin2"},
+    },
+    "PREFECT_PLUGINS_DENY": {
+        "test_value": "plugin3",
+        "expected_value": {"plugin3"},
+    },
+    "PREFECT_PLUGINS_ENABLED": {"test_value": True},
+    "PREFECT_PLUGINS_SAFE_MODE": {"test_value": True},
+    "PREFECT_PLUGINS_SETUP_TIMEOUT_SECONDS": {"test_value": 30.0},
+    "PREFECT_PLUGINS_STRICT": {"test_value": True},
     "PREFECT_FLOW_DEFAULT_RETRIES": {"test_value": 10, "legacy": True},
     "PREFECT_FLOWS_DEFAULT_RETRIES": {"test_value": 10},
     "PREFECT_FLOW_DEFAULT_RETRY_DELAY_SECONDS": {"test_value": 10, "legacy": True},
@@ -301,7 +335,10 @@ SUPPORTED_SETTINGS = {
     "PREFECT_RESULTS_DEFAULT_STORAGE_BLOCK": {"test_value": "block"},
     "PREFECT_RESULTS_LOCAL_STORAGE_PATH": {"test_value": Path("/path/to/storage")},
     "PREFECT_RESULTS_PERSIST_BY_DEFAULT": {"test_value": True},
-    "PREFECT_RUNNER_HEARTBEAT_FREQUENCY": {"test_value": 30},
+    "PREFECT_RUNNER_AUTO_INSTALL_DEPENDENCIES": {"test_value": True},
+    "PREFECT_RUNNER_CRASH_ON_CANCELLATION_FAILURE": {"test_value": True},
+    "PREFECT_FLOWS_HEARTBEAT_FREQUENCY": {"test_value": 30},
+    "PREFECT_RUNNER_HEARTBEAT_FREQUENCY": {"test_value": 30, "legacy": True},
     "PREFECT_RUNNER_POLL_FREQUENCY": {"test_value": 10},
     "PREFECT_RUNNER_PROCESS_LIMIT": {"test_value": 10},
     "PREFECT_RUNNER_SERVER_ENABLE": {"test_value": True},
@@ -320,13 +357,19 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_API_CSRF_PROTECTION_ENABLED": {"test_value": True},
     "PREFECT_SERVER_API_DEFAULT_LIMIT": {"test_value": 10},
     "PREFECT_SERVER_API_HOST": {"test_value": "host"},
+    "PREFECT_SERVER_API_MAX_PARAMETER_SIZE": {"test_value": 1024},
     "PREFECT_SERVER_API_KEEPALIVE_TIMEOUT": {"test_value": 10},
     "PREFECT_SERVER_API_PORT": {"test_value": 4200},
+    "PREFECT_SERVER_API_WEBSOCKET_PING_INTERVAL": {"test_value": 30.0},
+    "PREFECT_SERVER_API_WEBSOCKET_PING_TIMEOUT": {"test_value": 30.0},
     "PREFECT_SERVER_CONCURRENCY_LEASE_STORAGE": {
         "test_value": "prefect.server.concurrency.lease_storage.filesystem"
     },
     "PREFECT_SERVER_CONCURRENCY_INITIAL_DEPLOYMENT_LEASE_DURATION": {
         "test_value": 120.0
+    },
+    "PREFECT_SERVER_CONCURRENCY_MAXIMUM_CONCURRENCY_SLOT_WAIT_SECONDS": {
+        "test_value": 60.0
     },
     "PREFECT_SERVER_CORS_ALLOWED_HEADERS": {"test_value": "foo", "legacy": True},
     "PREFECT_SERVER_CORS_ALLOWED_METHODS": {"test_value": "foo", "legacy": True},
@@ -342,6 +385,7 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_DATABASE_ECHO": {"test_value": True},
     "PREFECT_SERVER_DATABASE_HOST": {"test_value": "localhost"},
     "PREFECT_SERVER_DATABASE_MIGRATE_ON_START": {"test_value": True},
+    "PREFECT_SERVER_DATABASE_MIGRATION_TIMEOUT": {"test_value": 10.0},
     "PREFECT_SERVER_DATABASE_NAME": {"test_value": "prefect"},
     "PREFECT_SERVER_DATABASE_PASSWORD": {"test_value": "password"},
     "PREFECT_SERVER_DATABASE_PORT": {"test_value": 5432},
@@ -350,6 +394,9 @@ SUPPORTED_SETTINGS = {
     },
     "PREFECT_SERVER_DATABASE_SQLALCHEMY_CONNECT_ARGS_PREPARED_STATEMENT_CACHE_SIZE": {
         "test_value": 1
+    },
+    "PREFECT_SERVER_DATABASE_SQLALCHEMY_CONNECT_ARGS_SEARCH_PATH": {
+        "test_value": "myschema"
     },
     "PREFECT_SERVER_DATABASE_SQLALCHEMY_CONNECT_ARGS_STATEMENT_CACHE_SIZE": {
         "test_value": 1
@@ -371,6 +418,16 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_DATABASE_USER": {"test_value": "user"},
     "PREFECT_SERVER_DEPLOYMENTS_CONCURRENCY_SLOT_WAIT_SECONDS": {"test_value": 10.0},
     "PREFECT_SERVER_DEPLOYMENT_SCHEDULE_MAX_SCHEDULED_RUNS": {"test_value": 10},
+    "PREFECT_SERVER_DOCKET_NAME": {"test_value": "test-docket"},
+    "PREFECT_SERVER_DOCKET_URL": {"test_value": "redis://localhost:6379/0"},
+    "PREFECT_SERVER_WORKER_CHANNEL_CLEANUP_COMPLETED_IDEMPOTENCY_RETENTION_SECONDS": {
+        "test_value": 3600.0
+    },
+    "PREFECT_SERVER_WORKER_CHANNEL_CLEANUP_LEASE_SECONDS": {"test_value": 60.0},
+    "PREFECT_SERVER_WORKER_CHANNEL_CLEANUP_MAX_DELIVERY_ATTEMPTS": {"test_value": 5},
+    "PREFECT_SERVER_WORKER_CHANNEL_CLEANUP_QUEUE_STORAGE": {
+        "test_value": "prefect.server.worker_communication.cleanup_queue.memory"
+    },
     "PREFECT_SERVER_EPHEMERAL_ENABLED": {"test_value": True},
     "PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS": {"test_value": 10},
     "PREFECT_SERVER_EVENTS_CAUSAL_ORDERING": {
@@ -406,12 +463,31 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_METRICS_ENABLED": {"test_value": True},
     "PREFECT_SERVER_REGISTER_BLOCKS_ON_START": {"test_value": True},
     "PREFECT_SERVER_SERVICES_CANCELLATION_CLEANUP_ENABLED": {"test_value": True},
+    "PREFECT_SERVER_SERVICES_CANCELLATION_CLEANUP_CANCELLING_TIMEOUT_SECONDS": {
+        "test_value": 60.0
+    },
     "PREFECT_SERVER_SERVICES_CANCELLATION_CLEANUP_LOOP_SECONDS": {"test_value": 10.0},
+    "PREFECT_SERVER_SERVICES_DB_VACUUM_BATCH_SIZE": {"test_value": 500},
+    "PREFECT_SERVER_SERVICES_DB_VACUUM_ENABLED": {
+        "test_value": "events,flow_runs",
+        "expected_value": {"events", "flow_runs"},
+    },
+    "PREFECT_SERVER_SERVICES_DB_VACUUM_EVENT_RETENTION_OVERRIDES": {
+        "test_value": '{"prefect.flow-run.heartbeat": 3600}',
+        "expected_value": {"prefect.flow-run.heartbeat": timedelta(hours=1)},
+    },
+    "PREFECT_SERVER_SERVICES_DB_VACUUM_LOOP_SECONDS": {"test_value": 1800.0},
+    "PREFECT_SERVER_SERVICES_DB_VACUUM_RETENTION_PERIOD": {
+        "test_value": 172800,
+        "expected_value": timedelta(days=2),
+    },
     "PREFECT_SERVER_SERVICES_EVENT_LOGGER_ENABLED": {"test_value": True},
     "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_BATCH_SIZE": {"test_value": 10},
-    "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_BATCH_SIZE_DELETE": {"test_value": 20},
+    "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_READ_BATCH_SIZE": {"test_value": 10},
     "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_ENABLED": {"test_value": True},
     "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_FLUSH_INTERVAL": {"test_value": 10.0},
+    "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_MAX_FLUSH_RETRIES": {"test_value": 3},
+    "PREFECT_SERVER_SERVICES_EVENT_PERSISTER_QUEUE_MAX_SIZE": {"test_value": 10000},
     "PREFECT_SERVER_SERVICES_FOREMAN_DEPLOYMENT_LAST_POLLED_TIMEOUT_SECONDS": {
         "test_value": 10
     },
@@ -433,6 +509,9 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_SERVICES_PAUSE_EXPIRATIONS_LOOP_SECONDS": {"test_value": 10.0},
     "PREFECT_SERVER_SERVICES_REPOSSESSOR_ENABLED": {"test_value": True},
     "PREFECT_SERVER_SERVICES_REPOSSESSOR_LOOP_SECONDS": {"test_value": 10.0},
+    "PREFECT_SERVER_SERVICES_CLEANUP_RECONCILER_BATCH_SIZE": {"test_value": 10},
+    "PREFECT_SERVER_SERVICES_CLEANUP_RECONCILER_ENABLED": {"test_value": True},
+    "PREFECT_SERVER_SERVICES_CLEANUP_RECONCILER_LOOP_SECONDS": {"test_value": 10.0},
     "PREFECT_SERVER_SERVICES_SCHEDULER_DEPLOYMENT_BATCH_SIZE": {"test_value": 10},
     "PREFECT_SERVER_SERVICES_SCHEDULER_ENABLED": {"test_value": True},
     "PREFECT_SERVER_SERVICES_SCHEDULER_INSERT_BATCH_SIZE": {"test_value": 10},
@@ -449,7 +528,11 @@ SUPPORTED_SETTINGS = {
         "test_value": timedelta(minutes=10)
     },
     "PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_ENABLED": {"test_value": True},
+    "PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_BATCH_SIZE": {"test_value": 1},
+    "PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_FLUSH_INTERVAL": {"test_value": 1.0},
+    "PREFECT_SERVER_SERVICES_TASK_RUN_RECORDER_READ_BATCH_SIZE": {"test_value": 1},
     "PREFECT_SERVER_SERVICES_TRIGGERS_ENABLED": {"test_value": True},
+    "PREFECT_SERVER_SERVICES_TRIGGERS_READ_BATCH_SIZE": {"test_value": 1},
     "PREFECT_SERVER_SERVICES_TRIGGERS_PG_NOTIFY_HEARTBEAT_INTERVAL_SECONDS": {
         "test_value": 5
     },
@@ -470,6 +553,7 @@ SUPPORTED_SETTINGS = {
     "PREFECT_SERVER_UI_SERVE_BASE": {"test_value": "/base"},
     "PREFECT_SERVER_UI_SHOW_PROMOTIONAL_CONTENT": {"test_value": False},
     "PREFECT_SERVER_UI_STATIC_DIRECTORY": {"test_value": "/path/to/static"},
+    "PREFECT_SERVER_UI_V2_ENABLED": {"test_value": False},
     "PREFECT_SILENCE_API_URL_MISCONFIGURATION": {"test_value": True},
     "PREFECT_SQLALCHEMY_MAX_OVERFLOW": {"test_value": 10, "legacy": True},
     "PREFECT_SQLALCHEMY_POOL_SIZE": {"test_value": 10, "legacy": True},
@@ -506,6 +590,8 @@ SUPPORTED_SETTINGS = {
         "test_value": timedelta(seconds=10),
         "legacy": True,
     },
+    "PREFECT_TELEMETRY_ENABLE_RESOURCE_METRICS": {"test_value": False},
+    "PREFECT_TELEMETRY_RESOURCE_METRICS_INTERVAL_SECONDS": {"test_value": 30},
     "PREFECT_TESTING_TEST_MODE": {"test_value": True},
     "PREFECT_TESTING_TEST_SETTING": {"test_value": "bar"},
     "PREFECT_TESTING_UNIT_TEST_LOOP_DEBUG": {"test_value": True},
@@ -519,6 +605,9 @@ SUPPORTED_SETTINGS = {
     "PREFECT_UI_URL": {"test_value": "https://ui.prefect.io"},
     "PREFECT_UNIT_TEST_LOOP_DEBUG": {"test_value": True, "legacy": True},
     "PREFECT_UNIT_TEST_MODE": {"test_value": True, "legacy": True},
+    "PREFECT_WORKER_CANCELLATION_POLL_SECONDS": {"test_value": 60.0},
+    "PREFECT_WORKER_DEBUG_MODE": {"test_value": True},
+    "PREFECT_WORKER_ENABLE_CANCELLATION": {"test_value": True},
     "PREFECT_WORKER_HEARTBEAT_SECONDS": {"test_value": 10.0},
     "PREFECT_WORKER_PREFETCH_SECONDS": {"test_value": 10.0},
     "PREFECT_WORKER_QUERY_SECONDS": {"test_value": 10.0},
@@ -644,7 +733,7 @@ class TestSettingsClass:
 
     @pytest.mark.usefixtures("disable_hosted_api_server")
     def test_settings_to_environment_includes_all_settings_with_non_null_values(self):
-        settings = Settings()
+        settings = get_current_settings()
         expected_names = {
             s.name
             for s in _get_settings_fields(Settings).values()
@@ -656,12 +745,15 @@ class TestSettingsClass:
         assert set(settings.to_environment_variables().keys()) == expected_names
 
     def test_settings_to_environment_works_with_exclude_unset(self):
+        valid_setting_names = _get_valid_setting_names(Settings)
         assert Settings(
             server=ServerSettings(api=ServerAPISettings(port=3000))
         ).to_environment_variables(exclude_unset=True) == {
-            # From env
+            # From env. `PREFECT_`-prefixed variables that are not settings, such
+            # as `PREFECT_LOGFIRE_ENABLED`, do not appear in the environment of a
+            # `Settings` instance.
             **{
-                var: os.environ[var] for var in os.environ if var.startswith("PREFECT_")
+                var: os.environ[var] for var in os.environ if var in valid_setting_names
             },
             # From test settings
             "PREFECT_SERVER_LOGGING_LEVEL": "DEBUG",
@@ -846,12 +938,88 @@ class TestSettingsClass:
         with pytest.warns(UserWarning, match="Failed to load profiles from"):
             assert Settings().testing.test_setting == "FOO"
 
+    def test_read_toml_file_is_thread_safe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Regression test for concurrent access to the TTLCache in
+        `_read_toml_file`. `TTLCache` is not thread-safe: `__setitem__` calls
+        `expire()`, which walks the cache's internal linked list. Concurrent
+        mutation corrupts that list and raises a spurious `KeyError` on a key
+        that was just present (see OSS-8092).
+
+        A near-zero TTL forces entries to expire on every access so `expire()`
+        actually deletes links, and a tiny thread switch interval makes the GIL
+        hand off inside those walks, which is what surfaces the race.
+        """
+        # replace the module-level cache with one that expires immediately so
+        # every access exercises the expire()/mutate race
+        monkeypatch.setattr(
+            "prefect.settings.sources._file_cache",
+            TTLCache(maxsize=100, ttl=0.0),
+        )
+        original_switch_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-9)
+
+        paths: list[Path] = []
+        for i in range(50):
+            path = tmp_path / f"profiles_{i}.toml"
+            path.write_text(f"[profiles.test]\nvalue = {i}\n")
+            paths.append(path)
+
+        def read_all() -> None:
+            for _ in range(50):
+                for path in paths:
+                    _read_toml_file(path)
+
+        try:
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                futures = [executor.submit(read_all) for _ in range(16)]
+                for future in futures:
+                    future.result()
+        finally:
+            sys.setswitchinterval(original_switch_interval)
+
     def test_valid_setting_names_matches_supported_settings(self):
         assert set(_get_valid_setting_names(Settings)) == set(
             SUPPORTED_SETTINGS.keys()
         ), (
             "valid_setting_names output did not match supported settings. Please update SUPPORTED_SETTINGS if you are adding or removing a setting."
         )
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_connected_to_cloud_true_when_api_url_matches_cloud(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "https://api.prefect.cloud/api"}
+        ) as settings:
+            assert settings.connected_to_cloud is True
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_connected_to_cloud_true_with_accounts_subdomain(self):
+        with temporary_settings(
+            updates={
+                PREFECT_API_URL: "https://api.prefect.cloud/api/accounts/foo/workspaces/bar"
+            }
+        ) as settings:
+            assert settings.connected_to_cloud is True
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_connected_to_cloud_false_for_self_hosted(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "http://localhost:4200/api"}
+        ) as settings:
+            assert settings.connected_to_cloud is False
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_connected_to_cloud_false_when_no_api_url(self):
+        with temporary_settings(restore_defaults={PREFECT_API_URL}) as settings:
+            assert settings.connected_to_cloud is False
+
+    @pytest.mark.usefixtures("disable_hosted_api_server")
+    def test_connected_to_cloud_false_with_different_domain(self):
+        with temporary_settings(
+            updates={PREFECT_API_URL: "https://example.com/api"}
+        ) as settings:
+            assert settings.connected_to_cloud is False
 
 
 class TestSettingAccess:
@@ -1081,8 +1249,95 @@ class TestSettingAccess:
         assert isinstance(PREFECT_CLIENT_ENABLE_METRICS, Setting)
         assert isinstance(PREFECT_CLIENT_METRICS_ENABLED, Setting)
 
+    def test_heartbeat_frequency_legacy_env_var_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Test that PREFECT_RUNNER_HEARTBEAT_FREQUENCY still works as an alias."""
+        # Test with legacy env var
+        monkeypatch.setenv("PREFECT_RUNNER_HEARTBEAT_FREQUENCY", "60")
+        settings = Settings()
+        assert settings.flows.heartbeat_frequency == 60
+
+        # Cleanup and test with new env var
+        monkeypatch.delenv("PREFECT_RUNNER_HEARTBEAT_FREQUENCY", raising=False)
+        monkeypatch.setenv("PREFECT_FLOWS_HEARTBEAT_FREQUENCY", "90")
+        settings = Settings()
+        assert settings.flows.heartbeat_frequency == 90
+
+    def test_db_vacuum_enabled_bool_true_compat(self, monkeypatch: pytest.MonkeyPatch):
+        """Legacy ENABLED=true should map to both vacuum types enabled."""
+        monkeypatch.setenv("PREFECT_SERVER_SERVICES_DB_VACUUM_ENABLED", "true")
+        settings = Settings()
+        assert settings.server.services.db_vacuum.enabled_vacuum_types == {
+            "events",
+            "flow_runs",
+        }
+
+    def test_db_vacuum_enabled_bool_false_compat(self, monkeypatch: pytest.MonkeyPatch):
+        """Legacy ENABLED=false should preserve event vacuum (old default behavior)."""
+        monkeypatch.setenv("PREFECT_SERVER_SERVICES_DB_VACUUM_ENABLED", "false")
+        settings = Settings()
+        assert settings.server.services.db_vacuum.enabled_vacuum_types == {"events"}
+
+    def test_db_vacuum_enabled_rejects_invalid_types(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Invalid vacuum type names should raise a validation error."""
+        monkeypatch.setenv("PREFECT_SERVER_SERVICES_DB_VACUUM_ENABLED", "events,bogus")
+        settings = Settings()
+        with pytest.raises(ValueError, match="Invalid vacuum type"):
+            settings.server.services.db_vacuum.enabled_vacuum_types
+
+    def test_db_vacuum_event_retention_override_rejects_negative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Negative retention overrides should be rejected."""
+        monkeypatch.setenv(
+            "PREFECT_SERVER_SERVICES_DB_VACUUM_EVENT_RETENTION_OVERRIDES",
+            '{"prefect.flow-run.heartbeat": -1}',
+        )
+        with pytest.raises(Exception, match="must be positive"):
+            Settings()
+
+    def test_deprecated_runner_heartbeat_frequency_access(self):
+        """Test that accessing runner.heartbeat_frequency emits deprecation warning."""
+        settings = get_current_settings()
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+
+            # Access the deprecated attribute
+            value = settings.runner.heartbeat_frequency
+
+            assert len(w) == 1
+            assert issubclass(w[-1].category, DeprecationWarning)
+            assert "runner.heartbeat_frequency" in str(w[-1].message)
+            assert "flows.heartbeat_frequency" in str(w[-1].message)
+
+        # The value should equal the flows setting
+        assert value == settings.flows.heartbeat_frequency
+
 
 class TestDatabaseSettings:
+    def test_migration_timeout_defaults_to_none(self):
+        """Migrations are not bound by the application statement timeout.
+
+        Schema changes such as concurrent index builds on large tables can take
+        far longer than an ordinary API query, so `migration_timeout` defaults
+        to no timeout rather than inheriting `server.database.timeout`.
+        """
+        settings = get_current_settings()
+        assert settings.server.database.migration_timeout is None
+        assert settings.server.database.timeout == 10.0
+
+    @pytest.mark.parametrize("value", [0, -1.0])
+    def test_migration_timeout_rejects_non_positive(self, value: float):
+        """asyncpg's `command_timeout` requires a positive value, so a `0` or
+        negative migration timeout must be rejected up front rather than failing
+        every PostgreSQL migration connection at server startup.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            ServerDatabaseSettings(migration_timeout=value)
+
     def test_database_connection_url_templates_password(self):
         with temporary_settings(
             {
@@ -1338,6 +1593,21 @@ class TestDatabaseSettings:
             assert settings.server.database.sqlalchemy_pool_size == 42
             assert settings.server.database.sqlalchemy_max_overflow == 37
 
+    def test_search_path_setting_is_accessible(self, monkeypatch):
+        """Test that the search_path setting can be set and accessed."""
+        monkeypatch.setenv(
+            "PREFECT_SERVER_DATABASE_SQLALCHEMY_CONNECT_ARGS_SEARCH_PATH", "myschema"
+        )
+        settings = Settings()
+        assert (
+            settings.server.database.sqlalchemy.connect_args.search_path == "myschema"
+        )
+
+    def test_search_path_setting_defaults_to_none(self):
+        """Test that the search_path setting defaults to None."""
+        settings = Settings()
+        assert settings.server.database.sqlalchemy.connect_args.search_path is None
+
 
 class TestTemporarySettings:
     def test_temporary_settings(self):
@@ -1367,6 +1637,48 @@ class TestTemporarySettings:
                     == PREFECT_API_DATABASE_PORT.default()
                 )
 
+    def test_temporary_settings_accepts_setting_accessor_strings(self):
+        assert get_current_settings().server.api.host == "127.0.0.1"
+
+        with temporary_settings(updates={"server.api.host": "0.0.0.0"}) as settings:
+            assert settings.server.api.host == "0.0.0.0"
+            assert get_current_settings().server.api.host == "0.0.0.0"
+
+        assert get_current_settings().server.api.host == "127.0.0.1"
+
+    def test_temporary_settings_accepts_environment_variable_strings(self):
+        with temporary_settings(updates={"PREFECT_SERVER_API_HOST": "0.0.0.0"}):
+            assert get_current_settings().server.api.host == "0.0.0.0"
+
+    def test_temporary_settings_set_defaults_accepts_setting_accessor_strings(self):
+        with temporary_settings(set_defaults={"server.api.host": "0.0.0.0"}):
+            assert get_current_settings().server.api.host == "0.0.0.0"
+
+        with temporary_settings(updates={"server.api.host": "localhost"}):
+            with temporary_settings(set_defaults={"server.api.host": "0.0.0.0"}):
+                assert get_current_settings().server.api.host == "localhost"
+
+    def test_temporary_settings_restore_defaults_accepts_setting_accessor_strings(self):
+        with temporary_settings(updates={"server.api.host": "0.0.0.0"}):
+            assert get_current_settings().server.api.host == "0.0.0.0"
+            with temporary_settings(restore_defaults={"server.api.host"}):
+                assert get_current_settings().server.api.host == "127.0.0.1"
+
+    def test_temporary_settings_rejects_unknown_setting_strings(self):
+        with pytest.raises(ValueError, match="Unknown setting"):
+            with temporary_settings(updates={"server.api.not_real": "nope"}):
+                pass
+
+    def test_setting_accessor_type_alias_is_current(self):
+        from typing import get_args
+
+        from prefect.settings._types import SettingAccessor
+
+        setting_keys = _get_settings_accessors(Settings)
+        expected_accessors = set(setting_keys.values())
+
+        assert set(get_args(SettingAccessor)) == expected_accessors
+
     def test_temporary_settings_restores_on_error(self):
         assert PREFECT_TEST_MODE.value() is True
 
@@ -1389,6 +1701,35 @@ class TestSettingsSources:
         os.unlink(".env")
 
         assert Settings().client.retry_extra_codes == set()
+
+    def test_nested_setting_loaded_from_dotenv(
+        self, temporary_env_file: Callable[[str], None]
+    ):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/21664
+
+        Pydantic-settings 2.14.0 added a new positional parameter to
+        `DotEnvSettingsSource.__init__`. Passing arguments to `super().__init__`
+        by position in `FilteredDotEnvSettingsSource` caused the `env_prefix`
+        value to be interpreted as `case_sensitive`, breaking nested setting
+        resolution from `.env` files (e.g. `PREFECT_API_URL` -> `api.url`).
+        """
+        temporary_env_file("PREFECT_API_URL=http://from-dotenv:4200/api")
+
+        assert Settings().api.url == "http://from-dotenv:4200/api"
+
+    def test_env_fifo_does_not_hang(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ):
+        """Regression test for https://github.com/PrefectHQ/prefect/issues/21319"""
+        monkeypatch.delenv("PREFECT_TESTING_TEST_MODE", raising=False)
+        monkeypatch.delenv("PREFECT_TESTING_UNIT_TEST_MODE", raising=False)
+        monkeypatch.chdir(tmp_path)
+
+        os.mkfifo(".env")
+
+        from prefect.settings.sources import _get_profiles_path
+
+        _get_profiles_path()
 
     def test_resolution_order(
         self,
@@ -1942,7 +2283,7 @@ class TestLoadProfiles:
         expected = {
             "ephemeral": {
                 PREFECT_API_KEY: "foo",
-                PREFECT_SERVER_ALLOW_EPHEMERAL_MODE: "true",  # default value
+                PREFECT_SERVER_EPHEMERAL_ENABLED: "true",  # default value
             },
             "bar": {PREFECT_API_KEY: "bar"},
         }
@@ -1953,7 +2294,7 @@ class TestLoadProfiles:
     def test_load_profile_ephemeral(self):
         assert load_profile("ephemeral") == Profile(
             name="ephemeral",
-            settings={PREFECT_SERVER_ALLOW_EPHEMERAL_MODE: "true"},
+            settings={PREFECT_SERVER_EPHEMERAL_ENABLED: "true"},
             source=DEFAULT_PROFILES_PATH,
         )
 
@@ -2087,13 +2428,13 @@ class TestProfile:
     def test_validate_settings_nested_field_constraints(self):
         """
         Test that nested field constraints are properly validated.
-        Regression test for issue #18258: PREFECT_RUNNER_HEARTBEAT_FREQUENCY validation.
+        Regression test for issue #18258: PREFECT_FLOWS_HEARTBEAT_FREQUENCY validation.
         """
-        from prefect.settings import PREFECT_RUNNER_HEARTBEAT_FREQUENCY
+        from prefect.settings import PREFECT_FLOWS_HEARTBEAT_FREQUENCY
 
         # Test invalid value (< 30)
         profile = Profile(
-            name="test", settings={PREFECT_RUNNER_HEARTBEAT_FREQUENCY: "5"}
+            name="test", settings={PREFECT_FLOWS_HEARTBEAT_FREQUENCY: "5"}
         )
         with pytest.raises(
             ProfileSettingsValidationError,
@@ -2103,10 +2444,118 @@ class TestProfile:
 
         # Test valid value (>= 30)
         profile = Profile(
-            name="test", settings={PREFECT_RUNNER_HEARTBEAT_FREQUENCY: "40"}
+            name="test", settings={PREFECT_FLOWS_HEARTBEAT_FREQUENCY: "40"}
         )
         # Should not raise
         profile.validate_settings()
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            {
+                "PREFECT_SERVER_DATABASE_TIMEOUT": 99,
+                "PREFECT_API_DATABASE_TIMEOUT": 42,
+            },
+            {
+                "PREFECT_API_DATABASE_TIMEOUT": 42,
+                "PREFECT_SERVER_DATABASE_TIMEOUT": 99,
+            },
+        ],
+    )
+    def test_canonical_name_takes_precedence_over_alias(
+        self, settings: dict[str | Setting, int]
+    ):
+        profile = Profile(name="test", settings=settings)
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+
+    def test_alias_casts_to_canonical_setting_when_canonical_missing(self):
+        profile = Profile(name="test", settings={"PREFECT_API_DATABASE_TIMEOUT": 42})
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+
+
+class TestCastSettings:
+    def test_canonical_setting_wins_over_legacy_setting_object_in_both_orders(self):
+        assert _cast_settings(
+            {PREFECT_SERVER_DATABASE_TIMEOUT: 99, PREFECT_API_DATABASE_TIMEOUT: 42}
+        ) == {PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+        assert _cast_settings(
+            {PREFECT_API_DATABASE_TIMEOUT: 42, PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+        ) == {PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+
+    def test_legacy_setting_object_maps_to_canonical_key(self):
+        assert _cast_settings({PREFECT_API_DATABASE_TIMEOUT: 42}) == {
+            PREFECT_SERVER_DATABASE_TIMEOUT: 42
+        }
+
+    def test_profile_canonicalizes_legacy_setting_object(self):
+        profile = Profile(name="test", settings={PREFECT_API_DATABASE_TIMEOUT: 42})
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+
+    def test_profile_prefers_canonical_setting_object_over_legacy(self):
+        profile = Profile(
+            name="test",
+            settings={
+                PREFECT_SERVER_DATABASE_TIMEOUT: 99,
+                PREFECT_API_DATABASE_TIMEOUT: 42,
+            },
+        )
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+
+    def test_legacy_setting_key_looks_up_canonical_entry(self):
+        profile = Profile(name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99})
+        assert profile.settings[PREFECT_API_DATABASE_TIMEOUT] == 99
+        assert profile.settings.get(PREFECT_API_DATABASE_TIMEOUT) == 99
+        assert PREFECT_API_DATABASE_TIMEOUT in profile.settings
+        assert profile.settings == {PREFECT_API_DATABASE_TIMEOUT: 99}
+        assert profile.to_environment_variables() == {
+            "PREFECT_SERVER_DATABASE_TIMEOUT": "99"
+        }
+
+    def test_legacy_setting_key_setitem_canonicalizes(self):
+        profile = Profile(name="test", settings={})
+        profile.settings[PREFECT_API_DATABASE_TIMEOUT] = 42
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+        assert profile.to_environment_variables() == {
+            "PREFECT_SERVER_DATABASE_TIMEOUT": "42"
+        }
+
+    def test_settings_equality_with_legacy_keys(self):
+        profile = Profile(name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99})
+        assert profile.settings == {PREFECT_API_DATABASE_TIMEOUT: 99}
+        assert profile.settings != {PREFECT_API_DATABASE_TIMEOUT: 100}
+        assert not (profile.settings != {PREFECT_API_DATABASE_TIMEOUT: 99})
+        assert profile.settings != {PREFECT_LOGGING_LEVEL: None}
+
+    def test_settings_union_canonicalizes_legacy_keys(self):
+        profile = Profile(name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99})
+        profile.settings |= {PREFECT_API_DATABASE_TIMEOUT: 42}
+        assert profile.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+        assert profile.to_environment_variables() == {
+            "PREFECT_SERVER_DATABASE_TIMEOUT": "42"
+        }
+
+        profile2 = Profile(name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99})
+        profile2.settings |= {"PREFECT_API_DATABASE_TIMEOUT": 42}
+        assert profile2.settings == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+
+    def test_settings_or_returns_canonical_keys(self):
+        profile = Profile(name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99})
+        merged = profile.settings | {PREFECT_API_DATABASE_TIMEOUT: 42}
+        assert merged == {PREFECT_SERVER_DATABASE_TIMEOUT: 42}
+        assert PREFECT_SERVER_DATABASE_TIMEOUT in merged
+        assert PREFECT_API_DATABASE_TIMEOUT in merged
+
+        reversed = {PREFECT_API_DATABASE_TIMEOUT: 42} | profile.settings
+        assert reversed == {PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+
+    def test_default_settings_not_marked_as_set(self):
+        profile = Profile(name="test")
+        assert "settings" not in profile.model_dump(exclude_unset=True)
+
+        profile_with_settings = Profile(
+            name="test", settings={PREFECT_SERVER_DATABASE_TIMEOUT: 99}
+        )
+        assert "settings" in profile_with_settings.model_dump(exclude_unset=True)
 
 
 class TestProfilesCollection:
@@ -2546,6 +2995,30 @@ class TestSettingValues:
 
         self.check_setting_value(setting, value, expected_value)
 
+    def test_db_vacuum_event_retention_overrides_via_toml(
+        self,
+        tmp_path: Path,
+    ):
+        """Dictionary-based settings should be configurable via TOML."""
+        # Write TOML manually because toml.dump treats dotted keys as nested
+        # tables, but event types like "prefect.flow-run.heartbeat" need to be
+        # quoted literal keys.
+        toml_content = textwrap.dedent("""\
+            [server.services.db_vacuum.event_retention_overrides]
+            "prefect.flow-run.heartbeat" = 3600
+            "prefect.custom-event" = 86400
+        """)
+        toml_file = tmp_path / "prefect.toml"
+        toml_file.write_text(toml_content)
+
+        with tmpchdir(str(tmp_path)):
+            with prefect.context.root_settings_context():
+                overrides = get_current_settings().server.services.db_vacuum.event_retention_overrides
+                assert overrides == {
+                    "prefect.flow-run.heartbeat": timedelta(hours=1),
+                    "prefect.custom-event": timedelta(days=1),
+                }
+
 
 class TestClientCustomHeadersSetting:
     """Test the PREFECT_CLIENT_CUSTOM_HEADERS setting."""
@@ -2720,3 +3193,36 @@ def test_prefect_custom_sources_satisfy_pydantic_warning_check() -> None:
         )
 
     assert not caught
+
+
+class TestWorkerDebugMode:
+    def test_worker_debug_mode_defaults_to_false(self):
+        settings = Settings()
+        assert settings.worker.debug_mode is False
+
+    def test_worker_debug_mode_does_not_set_root_debug_mode(self):
+        settings = Settings(worker={"debug_mode": True})
+        assert settings.debug_mode is False
+
+    def test_worker_debug_mode_does_not_set_global_logging_level(self):
+        settings = Settings(
+            worker={"debug_mode": True},
+            testing={"test_mode": False},
+        )
+        assert settings.logging.level != "DEBUG"
+
+    def test_worker_debug_mode_env_not_in_base_environment_as_debug_mode(self):
+        with temporary_settings({PREFECT_WORKER_DEBUG_MODE: True}):
+            env = get_current_settings().to_environment_variables(exclude_unset=True)
+            assert "PREFECT_WORKER_DEBUG_MODE" in env
+            assert "PREFECT_DEBUG_MODE" not in env
+
+    def test_root_debug_mode_still_sets_logging_to_debug(self):
+        settings = Settings(debug_mode=True)
+        assert settings.logging.level == "DEBUG"
+        assert settings.internal.logging_level == "DEBUG"
+
+    def test_root_debug_mode_propagates_via_base_environment(self):
+        with temporary_settings({PREFECT_DEBUG_MODE: True}):
+            env = get_current_settings().to_environment_variables(exclude_unset=True)
+            assert "PREFECT_DEBUG_MODE" in env

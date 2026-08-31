@@ -1,8 +1,9 @@
 /// <reference lib="dom" />
 import * as matchers from "@testing-library/jest-dom/matchers";
-import { cleanup } from "@testing-library/react";
+import { toast } from "sonner";
 import { afterAll, afterEach, beforeAll, expect, vi } from "vitest";
 import "@testing-library/jest-dom";
+import { uiSettings } from "../src/api/ui-settings";
 import { server } from "./utils";
 
 beforeAll(() => {
@@ -15,15 +16,14 @@ beforeAll(() => {
 	});
 });
 afterEach(() => {
+	toast.dismiss();
 	server.resetHandlers();
+	// Reset the UI settings singleton to ensure tests don't share cached state
+	uiSettings.reset();
 });
 afterAll(() => server.close());
 
 expect.extend(matchers);
-
-afterEach(() => {
-	cleanup();
-});
 
 // Mock matchMedia
 Object.defineProperty(window, "matchMedia", {
@@ -70,6 +70,23 @@ const localStorageMock: Storage = {
 };
 vi.stubGlobal("localStorage", localStorageMock);
 
+// Mock sessionStorage
+const sessionStorageMock: Storage = {
+	key: vi.fn(),
+	length: 0,
+	getItem: vi.fn(),
+	setItem: vi.fn(),
+	removeItem: vi.fn(),
+	clear: vi.fn(),
+};
+vi.stubGlobal("sessionStorage", sessionStorageMock);
+
+// Mock Amplitude analytics
+vi.mock("@amplitude/analytics-browser", () => ({
+	init: vi.fn(),
+	track: vi.fn(),
+}));
+
 Element.prototype.getBoundingClientRect = vi.fn(() => ({
 	width: 500,
 	height: 300,
@@ -81,3 +98,10 @@ Element.prototype.getBoundingClientRect = vi.fn(() => ({
 	y: 0,
 	toJSON: () => {},
 }));
+
+// jsdom reports 0 for offset dimensions, which makes virtualized lists measure
+// their scroll element as empty and render no items
+Object.defineProperties(HTMLElement.prototype, {
+	offsetWidth: { configurable: true, value: 500 },
+	offsetHeight: { configurable: true, value: 300 },
+});

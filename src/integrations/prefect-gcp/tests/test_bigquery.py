@@ -2,10 +2,13 @@ import os
 from unittest.mock import MagicMock
 
 import pytest
-from google.cloud.bigquery import ExternalConfig, SchemaField
+from google.cloud.bigquery import ExternalConfig, LoadJobConfig, SchemaField
 from google.cloud.bigquery.dbapi.connection import Connection
+from google.cloud.bigquery.format_options import ParquetOptions
 from prefect_gcp.bigquery import (
     BigQueryWarehouse,
+    _build_load_job_config,
+    abigquery_query,
     bigquery_create_table,
     bigquery_insert_stream,
     bigquery_load_cloud_storage,
@@ -50,6 +53,80 @@ def test_bigquery_query(
                 assert result == ("test_transformer",)
             else:
                 assert result == ["query"]
+
+
+class DryRunCapturingClient(MagicMock):
+    """Fake BigQuery client that records the job config used for each query."""
+
+    def __init__(self, error=None, total_bytes_processed=10, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.error = error
+        self.total_bytes_processed = total_bytes_processed
+        self.job_configs = []
+
+    def query(self, query, **kwargs):
+        self.job_configs.append(kwargs["job_config"])
+        if self.error is not None:
+            raise self.error
+        response = MagicMock()
+        response.total_bytes_processed = self.total_bytes_processed
+        return response
+
+
+@pytest.mark.parametrize(
+    "error,expected_error",
+    [(None, RuntimeError), (ValueError("dry run failed"), ValueError)],
+    ids=["over_max_bytes", "query_error"],
+)
+def test_bigquery_query_restores_job_config_on_dry_run_failure(
+    error, expected_error, gcp_credentials
+):
+    client = DryRunCapturingClient(error=error)
+    gcp_credentials.get_bigquery_client.return_value = client
+
+    @flow
+    def test_flow():
+        return bigquery_query(
+            "query",
+            gcp_credentials,
+            dry_run_max_bytes=5,
+            job_config={"use_query_cache": True},
+        )
+
+    with pytest.raises(expected_error):
+        test_flow()
+
+    job_config = client.job_configs[0]
+    assert job_config.dry_run is None
+    assert job_config.use_query_cache is True
+
+
+@pytest.mark.parametrize(
+    "error,expected_error",
+    [(None, RuntimeError), (ValueError("dry run failed"), ValueError)],
+    ids=["over_max_bytes", "query_error"],
+)
+async def test_abigquery_query_restores_job_config_on_dry_run_failure(
+    error, expected_error, gcp_credentials
+):
+    client = DryRunCapturingClient(error=error)
+    gcp_credentials.get_bigquery_client.return_value = client
+
+    @flow
+    async def test_flow():
+        return await abigquery_query(
+            "query",
+            gcp_credentials,
+            dry_run_max_bytes=5,
+            job_config={"use_query_cache": True},
+        )
+
+    with pytest.raises(expected_error):
+        await test_flow()
+
+    job_config = client.job_configs[0]
+    assert job_config.dry_run is None
+    assert job_config.use_query_cache is True
 
 
 def test_bigquery_create_table(gcp_credentials):
@@ -151,6 +228,92 @@ def test_bigquery_load_file(gcp_credentials):
     assert result.output == "file"
     assert result._client is None
     assert result._completion_lock is None
+
+
+class TestBuildLoadJobConfig:
+    def test_defaults_autodetect_true(self):
+        config = _build_load_job_config(None)
+        assert isinstance(config, LoadJobConfig)
+        assert config.autodetect is True
+
+    def test_respects_explicit_autodetect_false(self):
+        config = _build_load_job_config({"autodetect": False})
+        assert config.autodetect is False
+
+    def test_passes_through_plain_job_config(self):
+        config = _build_load_job_config(
+            {"source_format": "PARQUET", "autodetect": True}
+        )
+        assert config.source_format == "PARQUET"
+        assert config.autodetect is True
+
+    def test_converts_dict_parquet_options(self):
+        config = _build_load_job_config(
+            {
+                "source_format": "PARQUET",
+                "autodetect": False,
+                "parquet_options": {"enableListInference": True},
+            }
+        )
+        assert isinstance(config.parquet_options, ParquetOptions)
+        assert config.parquet_options.enable_list_inference is True
+        assert config.autodetect is False
+
+    def test_preserves_parquet_options_object(self):
+        opts = ParquetOptions.from_api_repr({"enableListInference": True})
+        config = _build_load_job_config({"parquet_options": opts})
+        assert isinstance(config.parquet_options, ParquetOptions)
+        assert config.parquet_options.enable_list_inference is True
+
+    def test_applies_schema(self):
+        schema = [SchemaField("id", "INTEGER")]
+        config = _build_load_job_config(None, schema=schema)
+        assert config.schema == schema
+
+    def test_does_not_mutate_input_dict(self):
+        original = {"source_format": "PARQUET"}
+        _build_load_job_config(original)
+        assert "autodetect" not in original
+
+
+def test_bigquery_load_cloud_storage_with_parquet_options(gcp_credentials):
+    @flow
+    def test_flow():
+        return bigquery_load_cloud_storage(
+            "dataset",
+            "table",
+            "uri",
+            gcp_credentials,
+            job_config={
+                "source_format": "PARQUET",
+                "autodetect": False,
+                "parquet_options": {"enableListInference": True},
+            },
+        )
+
+    result = test_flow()
+    assert result.output == "uri"
+
+
+def test_bigquery_load_file_with_parquet_options(gcp_credentials):
+    path = os.path.abspath(__file__)
+
+    @flow
+    def test_flow():
+        return bigquery_load_file(
+            "dataset",
+            "table",
+            path,
+            gcp_credentials,
+            job_config={
+                "source_format": "PARQUET",
+                "autodetect": False,
+                "parquet_options": {"enableListInference": True},
+            },
+        )
+
+    result = test_flow()
+    assert result.output == "file"
 
 
 class TestBigQueryWarehouse:

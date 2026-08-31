@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 from getpass import GetPassWarning
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-import prefect.cli.root as root
+from prefect._internal.git import get_git_branch, get_git_remote_origin_url
 from prefect.blocks.system import Secret
 from prefect.cli._prompts import (
     confirm,
@@ -13,7 +13,6 @@ from prefect.cli._prompts import (
     prompt_select_blob_storage_credentials,
     prompt_select_remote_flow_storage,
 )
-from prefect.utilities._git import get_git_branch, get_git_remote_origin_url
 from prefect.utilities.slugify import slugify
 
 if TYPE_CHECKING:
@@ -213,6 +212,8 @@ async def _generate_default_pull_action(
     console: "Console",
     deploy_config: dict[str, Any],
     actions: list[dict[str, Any]],
+    *,
+    is_interactive: Callable[[], bool],
 ) -> list[dict[str, Any]]:
     from prefect.cli._utilities import exit_with_error
 
@@ -225,7 +226,7 @@ async def _generate_default_pull_action(
             return await _generate_pull_step_for_build_docker_image(
                 console, deploy_config
             )
-        if root.is_interactive():
+        if is_interactive():
             if not confirm(
                 "Does your Dockerfile have a line that copies the current working"
                 " directory into your image?"
@@ -239,10 +240,55 @@ async def _generate_default_pull_action(
                 console, deploy_config, auto=False
             )
     else:
-        entrypoint_path, _ = deploy_config["entrypoint"].split(":")
+        # Check if user has a custom image in job_variables but no build step.
+        # In this case, the local cwd won't exist inside the container, so we
+        # need to use a container-appropriate working directory instead.
+        custom_image = (
+            deploy_config.get("work_pool", {}).get("job_variables", {}).get("image")
+        )
+        if custom_image:
+            if is_interactive():
+                dir_name = os.path.basename(os.getcwd())
+                pull_step = prompt(
+                    "What is the working directory in your Docker image"
+                    " where your flow code lives?",
+                    default=f"/opt/prefect/{dir_name}",
+                    console=console,
+                )
+                return [
+                    {
+                        "prefect.deployments.steps.set_working_directory": {
+                            "directory": pull_step
+                        }
+                    }
+                ]
+            else:
+                console.print(
+                    "[yellow]Warning: Using default working directory"
+                    " '/opt/prefect' for your Docker image. If your flow"
+                    " code is in a different location, add an explicit"
+                    " set_working_directory pull step to your"
+                    " prefect.yaml.[/yellow]"
+                )
+                return [
+                    {
+                        "prefect.deployments.steps.set_working_directory": {
+                            "directory": "/opt/prefect"
+                        }
+                    }
+                ]
+
+        entrypoint = deploy_config["entrypoint"]
+        if ":" in entrypoint:
+            entrypoint_path, _ = entrypoint.rsplit(":", 1)
+            flow_source = (Path.cwd() / Path(entrypoint_path)).absolute().resolve()
+        else:
+            # Module-path style entrypoint (e.g. `my_package.my_flow`); there is
+            # no local file to point at, so reference the working directory.
+            flow_source = Path.cwd().absolute().resolve()
         console.print(
             "Your Prefect workers will attempt to load your flow from:"
-            f" [green]{(Path.cwd() / Path(entrypoint_path)).absolute().resolve()}[/]. To"
+            f" [green]{flow_source}[/]. To"
             " see more options for managing your flow's code, run:\n\n\t[blue]$"
             " prefect init[/]\n"
         )

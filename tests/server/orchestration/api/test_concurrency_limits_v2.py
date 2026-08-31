@@ -5,6 +5,7 @@ from typing import Any, AsyncGenerator, Generator
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +25,13 @@ from prefect.server.models.concurrency_limits_v2 import (
 )
 from prefect.server.schemas.core import ConcurrencyLimitV2
 from prefect.server.utilities.leasing import ResourceLease
-from prefect.settings import PREFECT_SERVER_CONCURRENCY_LEASE_STORAGE
+from prefect.settings import (
+    PREFECT_SERVER_CONCURRENCY_LEASE_STORAGE,
+    PREFECT_SERVER_DOCKET_NAME,
+)
 from prefect.settings.context import temporary_settings
+
+pytestmark = pytest.mark.clear_db
 
 
 @pytest.fixture
@@ -41,7 +47,11 @@ def use_filesystem_lease_storage():
 
 @pytest.fixture()
 def app(use_filesystem_lease_storage: None) -> Generator[FastAPI, Any, None]:
-    yield create_app(ephemeral=True)
+    # Use a unique Docket name for each test to avoid Redis key collisions
+    # when using memory:// backend (fakeredis) which shares a single FakeServer
+    unique_name = f"test-docket-{uuid.uuid4().hex[:8]}"
+    with temporary_settings({PREFECT_SERVER_DOCKET_NAME: unique_name}):
+        yield create_app(ephemeral=True)
 
 
 @pytest.fixture
@@ -104,7 +114,10 @@ async def locked_concurrency_limit_with_decay(
             name="test_limit_with_decay",
             limit=10,
             active_slots=10,
-            slot_decay_per_second=1.0,
+            # Use a low decay rate to prevent race conditions in tests.
+            # With 0.1 decay/sec, it takes 10 seconds before any slot decays
+            # (since decay uses floor()), giving ample time for test execution.
+            slot_decay_per_second=0.1,
         ),
     )
     await session.commit()
@@ -120,7 +133,7 @@ async def expiring_concurrency_lease(
     return await get_concurrency_lease_storage().create_lease(
         resource_ids=[concurrency_limit.id],
         metadata=ConcurrencyLimitLeaseMetadata(slots=1),
-        ttl=timedelta(seconds=5),
+        ttl=timedelta(seconds=20),
     )
 
 
@@ -157,6 +170,36 @@ async def test_read_concurrency_limit_by_name(
     assert data["id"] == str(concurrency_limit.id)
 
 
+async def test_read_concurrency_limit_returns_decayed_active_slots(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+    client: AsyncClient,
+):
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="decaying-limit",
+            limit=10,
+            active_slots=10,
+            slot_decay_per_second=0.1,
+        ),
+    )
+    await session.commit()
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == concurrency_limit.id)
+        .values(updated=datetime.now(timezone.utc) - timedelta(seconds=30.5))
+    )
+    await session.commit()
+
+    response = await client.get(f"/v2/concurrency_limits/{concurrency_limit.id}")
+    assert response.status_code == 200, response.text
+
+    data = response.json()
+    assert data["id"] == str(concurrency_limit.id)
+    assert data["active_slots"] == 7
+
+
 async def test_read_concurrency_non_existent_limit(
     client: AsyncClient,
 ):
@@ -182,6 +225,35 @@ async def test_read_all_concurrency_limits(
     }
 
 
+async def test_read_all_concurrency_limits_returns_decayed_active_slots(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+    client: AsyncClient,
+):
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="decaying-limit",
+            limit=10,
+            active_slots=10,
+            slot_decay_per_second=0.1,
+        ),
+    )
+    await session.commit()
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == concurrency_limit.id)
+        .values(updated=datetime.now(timezone.utc) - timedelta(seconds=30.5))
+    )
+    await session.commit()
+
+    response = await client.post("/v2/concurrency_limits/filter")
+    assert response.status_code == 200, response.text
+
+    limits_by_id = {limit["id"]: limit for limit in response.json()}
+    assert limits_by_id[str(concurrency_limit.id)]["active_slots"] == 7
+
+
 async def test_update_concurrency_limit_by_id(
     concurrency_limit: ConcurrencyLimitV2,
     client: AsyncClient,
@@ -200,6 +272,45 @@ async def test_update_concurrency_limit_by_id(
     )
     assert limit
     assert str(limit.name) == "new-name"
+
+
+async def test_update_concurrency_limit_does_not_persist_decayed_active_slots(
+    session: AsyncSession,
+    db: PrefectDBInterface,
+    client: AsyncClient,
+):
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="decaying-limit",
+            limit=10,
+            active_slots=10,
+            slot_decay_per_second=0.1,
+        ),
+    )
+    await session.commit()
+    await session.execute(
+        sa.update(db.ConcurrencyLimitV2)
+        .where(db.ConcurrencyLimitV2.id == concurrency_limit.id)
+        .values(updated=datetime.now(timezone.utc) - timedelta(seconds=30.5))
+    )
+    await session.commit()
+
+    response = await client.patch(
+        f"/v2/concurrency_limits/{concurrency_limit.id}",
+        json=client_schemas.actions.ConcurrencyLimitV2Update(
+            name="renamed-limit"
+        ).model_dump(mode="json", exclude_unset=True),
+    )
+    assert response.status_code == 204, response.text
+
+    async with db.session_context() as new_session:
+        limit = await read_concurrency_limit(
+            session=new_session, concurrency_limit_id=concurrency_limit.id
+        )
+        assert limit
+        assert limit.name == "renamed-limit"
+        assert limit.active_slots == 10
 
 
 async def test_update_concurrency_limit_by_name(
@@ -513,7 +624,7 @@ async def test_increment_concurrency_limit_with_lease_ttl(
     assert lease.resource_ids == [concurrency_limit.id]
     assert lease.metadata == ConcurrencyLimitLeaseMetadata(slots=1)
     assert (
-        now + timedelta(seconds=60) <= lease.expiration <= now + timedelta(seconds=62)
+        now + timedelta(seconds=60) <= lease.expiration <= now + timedelta(seconds=65)
     )
 
 
@@ -674,8 +785,10 @@ async def test_increment_concurrency_limit_locked_no_decay_retry_after_header(
 
     assert locked_concurrency_limit.avg_slot_occupancy_seconds == 2.0
     # avg occupancy * ((num slots requested + num denied slots) / limit)
+    # clamped_poisson_interval adds jitter, so check approximate value
     expected_retry_after = 2.0 * ((1 + 10) / 10)
-    assert response.headers["Retry-After"] == str(expected_retry_after)
+    actual_retry_after = float(response.headers["Retry-After"])
+    assert abs(actual_retry_after - expected_retry_after) < expected_retry_after * 0.5
 
 
 @pytest.mark.parametrize("endpoint", ["increment", "increment-with-lease"])
@@ -702,10 +815,224 @@ async def test_increment_concurrency_limit_with_decay_locked_retry_after_header(
     )
     assert response.status_code == 423
 
-    assert locked_concurrency_limit_with_decay.slot_decay_per_second == 1.0
+    assert locked_concurrency_limit_with_decay.slot_decay_per_second == 0.1
     # (1.0 / slot_decay) * (num slots requested + num denied slots)
-    expected_retry_after = 1.0 * (1.0 + 10)
-    assert response.headers["Retry-After"] == str(expected_retry_after)
+    # clamped_poisson_interval adds jitter, so check approximate value
+    expected_retry_after = 10.0 * (1.0 + 10)
+    actual_retry_after = float(response.headers["Retry-After"])
+    assert abs(actual_retry_after - expected_retry_after) < expected_retry_after * 0.5
+
+
+@pytest.fixture
+async def locked_tag_concurrency_limit(session: AsyncSession) -> ConcurrencyLimitV2:
+    """
+    A locked concurrency limit with high avg occupancy.
+    Uses tag prefix to match scenario where long-running tasks
+    caused excessive retry delays.
+    """
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="tag:long-running",
+            limit=10,
+            active_slots=10,
+            avg_slot_occupancy_seconds=10800.0,  # 3 hours
+        ),
+    )
+    await session.commit()
+
+    return ConcurrencyLimitV2.model_validate(concurrency_limit)
+
+
+@pytest.mark.parametrize("endpoint", ["increment", "increment-with-lease"])
+async def test_increment_concurrency_limit_locked_caps_excessive_retry_after(
+    endpoint: str,
+    locked_tag_concurrency_limit: ConcurrencyLimitV2,
+    client: AsyncClient,
+    session: AsyncSession,
+):
+    """
+    Test that concurrency limits cap excessive avg_slot_occupancy_seconds.
+
+    When a limit has very high avg occupancy (e.g., 3 hours from long-running tasks),
+    the Retry-After should be capped at the configured max (default 30s) rather than
+    calculating based on the actual occupancy which would result in excessive delays
+    (e.g., 3 hours * 30 slots = 90 hours).
+
+    This applies to all concurrency limits, not just tag-based ones.
+    """
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[locked_tag_concurrency_limit.id],
+        slots=10,
+    )
+    await session.commit()
+
+    response = await client.post(
+        f"/v2/concurrency_limits/{endpoint}",
+        json={
+            "names": [locked_tag_concurrency_limit.name],
+            "slots": 1,
+            "mode": "concurrency",
+        },
+    )
+    assert response.status_code == 423
+
+    # For limits with excessive avg occupancy, Retry-After should be capped
+    # at the configured max (default 10s) rather than using the full avg_slot_occupancy_seconds
+    retry_after = float(response.headers["Retry-After"])
+
+    # Should be around 10 seconds (the default tag_concurrency_slot_wait_seconds cap)
+    # with some randomization from clamped_poisson_interval. Check for reasonable bounds
+    # rather than exact value due to jitter.
+    assert 5 < retry_after < 20, (
+        f"Expected ~10s with jitter, got {retry_after}s. "
+        f"If much higher, capping may be broken and using full avg_slot_occupancy_seconds "
+        f"({locked_tag_concurrency_limit.avg_slot_occupancy_seconds}s)"
+    )
+
+
+@pytest.fixture
+async def locked_tag_concurrency_limit_low_avg(
+    session: AsyncSession,
+) -> ConcurrencyLimitV2:
+    """
+    A locked tag-based concurrency limit with low avg occupancy.
+    This verifies we still use the actual avg when it's reasonable.
+    """
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="tag:quick-tasks",
+            limit=10,
+            active_slots=10,
+            avg_slot_occupancy_seconds=2.0,  # 2 seconds
+        ),
+    )
+    await session.commit()
+
+    return ConcurrencyLimitV2.model_validate(concurrency_limit)
+
+
+@pytest.mark.parametrize("endpoint", ["increment", "increment-with-lease"])
+async def test_increment_concurrency_limit_locked_respects_low_avg(
+    endpoint: str,
+    locked_tag_concurrency_limit_low_avg: ConcurrencyLimitV2,
+    client: AsyncClient,
+    session: AsyncSession,
+):
+    """
+    Test that concurrency limits respect low avg_slot_occupancy_seconds.
+
+    When a limit has reasonable avg occupancy (e.g., 2 seconds), we should use
+    that value rather than forcing it up to the configured max (default 30s).
+    This ensures fast-running tasks retry quickly.
+
+    This applies to all concurrency limits, not just tag-based ones.
+    """
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[locked_tag_concurrency_limit_low_avg.id],
+        slots=10,
+    )
+    await session.commit()
+
+    response = await client.post(
+        f"/v2/concurrency_limits/{endpoint}",
+        json={
+            "names": [locked_tag_concurrency_limit_low_avg.name],
+            "slots": 1,
+            "mode": "concurrency",
+        },
+    )
+    assert response.status_code == 423
+
+    # For limits with low avg occupancy, Retry-After should use the actual
+    # avg_slot_occupancy_seconds rather than forcing it up to the configured max
+    retry_after = float(response.headers["Retry-After"])
+
+    # Should be around 2 seconds (the actual avg_slot_occupancy_seconds)
+    # with some randomization from clamped_poisson_interval. Check for reasonable bounds.
+    assert 1 < retry_after < 5, (
+        f"Expected ~2s with jitter, got {retry_after}s. "
+        f"avg_slot_occupancy_seconds is {locked_tag_concurrency_limit_low_avg.avg_slot_occupancy_seconds}s, "
+        f"should not be forced up to the configured max"
+    )
+
+
+@pytest.fixture
+async def locked_concurrency_limit_moderate_avg(
+    session: AsyncSession,
+) -> ConcurrencyLimitV2:
+    """
+    A locked concurrency limit with moderate avg occupancy but will have
+    very high denied_slots to test the retry-after cap on total wait time.
+    """
+    concurrency_limit = await create_concurrency_limit(
+        session=session,
+        concurrency_limit=ConcurrencyLimitV2(
+            name="moderate-avg-limit",
+            limit=30,
+            active_slots=30,
+            avg_slot_occupancy_seconds=10.0,  # 10 seconds - reasonable
+        ),
+    )
+    await session.commit()
+
+    return ConcurrencyLimitV2.model_validate(concurrency_limit)
+
+
+@pytest.mark.parametrize("endpoint", ["increment", "increment-with-lease"])
+async def test_increment_concurrency_limit_caps_retry_after_with_high_denied_slots(
+    endpoint: str,
+    locked_concurrency_limit_moderate_avg: ConcurrencyLimitV2,
+    client: AsyncClient,
+    session: AsyncSession,
+):
+    """
+    Test that retry-after is capped even when denied_slots causes excessive values.
+
+    This is a regression test for the bug where burst traffic would accumulate
+    denied_slots, causing retry-after calculations to produce excessive values
+    (hours instead of seconds) even when avg_slot_occupancy_seconds is reasonable.
+
+    The bug scenario:
+    - slots = 1, denied_slots = 16000, limit = 30
+    - blocking_slots = (1 + 16000) / 30 = 533.7
+    - wait_time_per_slot = 10s (capped from avg_slot_occupancy_seconds)
+    - BUG: retry_after = 10s * 533.7 = 5337s (~89 minutes)
+    - FIX: retry_after = min(10s * 533.7, 30s) = ~30s
+
+    Reference: Nebula PR #10947
+    """
+    # Simulate burst traffic that accumulated many denied requests
+    await bulk_update_denied_slots(
+        session=session,
+        concurrency_limit_ids=[locked_concurrency_limit_moderate_avg.id],
+        slots=16000,  # High denied_slots from burst traffic
+    )
+    await session.commit()
+
+    response = await client.post(
+        f"/v2/concurrency_limits/{endpoint}",
+        json={
+            "names": [locked_concurrency_limit_moderate_avg.name],
+            "slots": 1,
+            "mode": "concurrency",
+        },
+    )
+    assert response.status_code == 423
+
+    retry_after = float(response.headers["Retry-After"])
+
+    # Without the fix, retry_after would be ~5337 seconds (89 minutes)
+    # With the fix, it should be capped at ~30 seconds (max_wait)
+    # Allow for jitter from clamped_poisson_interval
+    assert retry_after < 60, (
+        f"Expected retry_after to be capped at ~30s, got {retry_after}s. "
+        f"This suggests the fix for high denied_slots is not working. "
+        f"Without capping, the value would be ~{10.0 * (1 + 16000) / 30}s"
+    )
 
 
 @pytest.mark.parametrize("endpoint", ["increment", "increment-with-lease"])
@@ -903,19 +1230,22 @@ async def test_renew_concurrency_lease(
 ):
     lease_storage = get_concurrency_lease_storage()
     expired_lease_ids = await lease_storage.read_expired_lease_ids()
-    now = datetime.now(timezone.utc)
     assert not expired_lease_ids
 
+    before = datetime.now(timezone.utc)
     response = await client.post(
         f"/v2/concurrency_limits/leases/{expiring_concurrency_lease.id}/renew",
         json={"lease_duration": 600},
     )
     assert response.status_code == 204, response.text
+    after = datetime.now(timezone.utc)
 
     lease = await lease_storage.read_lease(expiring_concurrency_lease.id)
     assert lease
     assert (
-        now + timedelta(seconds=600) <= lease.expiration <= now + timedelta(seconds=602)
+        before + timedelta(seconds=600)
+        <= lease.expiration
+        <= after + timedelta(seconds=600)
     )
 
 

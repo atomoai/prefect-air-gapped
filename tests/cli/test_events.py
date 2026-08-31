@@ -12,6 +12,8 @@ from prefect.testing.cli import invoke_and_assert
 from prefect.testing.fixtures import Puppeteer
 from prefect.utilities.asyncutils import run_sync_in_worker_thread
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture
 def example_event_1() -> Event:
@@ -132,9 +134,26 @@ def oss_api_setup(events_api_url: str):
 @pytest.fixture
 def mock_events_client(monkeypatch: pytest.MonkeyPatch):
     mock_client = AssertingEventsClient()
+
+    def mock_factory(*args, **kwargs):
+        return mock_client
+
     monkeypatch.setattr(
         "prefect.cli.events.get_events_client",
-        lambda *args, **kwargs: mock_client,
+        mock_factory,
+    )
+    # Also patch the cyclopts implementation module.
+    try:
+        monkeypatch.setattr(
+            "prefect.cli.events.get_events_client",
+            mock_factory,
+        )
+    except AttributeError:
+        pass
+    # Also patch the source module.
+    monkeypatch.setattr(
+        "prefect.events.clients.get_events_client",
+        mock_factory,
     )
     return mock_client
 

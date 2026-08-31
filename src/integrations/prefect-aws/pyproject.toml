@@ -26,7 +26,7 @@ dependencies = [
     "aiobotocore>=2.23.2",
     "boto3>=1.24.53",
     "botocore>=1.27.53",
-    "prefect>=3.4.7",
+    "prefect>=3.7.0",
     "pyparsing>=3.1.1",
     "tenacity>=8.0.0",
     "typer>=0.9.0",
@@ -63,6 +63,9 @@ Homepage = "https://github.com/PrefectHQ/prefect/tree/main/src/integrations/pref
 
 [project.entry-points."prefect.collections"]
 prefect_aws = "prefect_aws"
+
+[project.entry-points."prefect.plugins"]
+aws = "prefect_aws.plugins"
 
 [project.scripts]
 prefect-aws = "prefect_aws._cli.main:app"

@@ -162,4 +162,107 @@ describe("WorkersTable", () => {
 
 		expect(searchInput).toHaveValue("");
 	});
+
+	it("renders sortable Name column header with sort button", () => {
+		renderWithQueryClient(
+			<WorkersTableWrapper
+				workPoolName="test-pool"
+				workers={mockWorkersOnline}
+			/>,
+		);
+
+		const sortButton = screen.getByRole("button", { name: /name/i });
+		expect(sortButton).toBeInTheDocument();
+	});
+
+	it("toggles sort direction when clicking the Name header", async () => {
+		const user = userEvent.setup();
+
+		renderWithQueryClient(
+			<WorkersTableWrapper
+				workPoolName="test-pool"
+				workers={mockWorkersOnline}
+			/>,
+		);
+
+		const sortButton = screen.getByRole("button", { name: /name/i });
+
+		const rows = screen.getAllByRole("row");
+		expect(rows.length).toBeGreaterThan(1); // header + data rows
+
+		// Click to toggle to ascending
+		await user.click(sortButton);
+
+		// Click again to toggle back to descending
+		await user.click(sortButton);
+
+		// Table should still render all workers
+		expect(screen.getByText("online-worker")).toBeInTheDocument();
+	});
+
+	it("sorts ONLINE workers before OFFLINE workers by default", () => {
+		const now = Date.now();
+		const workers = [
+			{
+				...mockWorkers[0],
+				name: "offline-old",
+				status: "OFFLINE" as const,
+				last_heartbeat_time: new Date(now - 60_000).toISOString(),
+			},
+			{
+				...mockWorkers[1],
+				name: "online-recent",
+				status: "ONLINE" as const,
+				last_heartbeat_time: new Date(now - 1_000).toISOString(),
+			},
+			{
+				...mockWorkers[2],
+				name: "online-older",
+				status: "ONLINE" as const,
+				last_heartbeat_time: new Date(now - 30_000).toISOString(),
+			},
+		];
+
+		renderWithQueryClient(
+			<WorkersTableWrapper workPoolName="test-pool" workers={workers} />,
+		);
+
+		const dataRows = screen
+			.getAllByRole("row")
+			.slice(1) // skip header row
+			.map((row) => row.textContent ?? "");
+
+		expect(dataRows[0]).toContain("online-recent");
+		expect(dataRows[1]).toContain("online-older");
+		expect(dataRows[2]).toContain("offline-old");
+	});
+
+	it("renders worker name cells with truncation and title tooltip", () => {
+		renderWithQueryClient(
+			<WorkersTableWrapper
+				workPoolName="test-pool"
+				workers={mockWorkersOnline}
+			/>,
+		);
+
+		const workerNameCell = screen.getByTitle("online-worker");
+		expect(workerNameCell).toBeInTheDocument();
+		expect(workerNameCell).toHaveClass("truncate");
+		expect(workerNameCell).toHaveClass("max-w-[200px]");
+	});
+
+	it("renders title attribute on all worker name cells", () => {
+		renderWithQueryClient(
+			<WorkersTableWrapper
+				workPoolName="test-pool"
+				workers={mockWorkersOnline}
+			/>,
+		);
+
+		for (const worker of mockWorkersOnline) {
+			const cell = screen.getByTitle(worker.name);
+			expect(cell).toBeInTheDocument();
+			expect(cell.tagName).toBe("SPAN");
+		}
+	});
 });

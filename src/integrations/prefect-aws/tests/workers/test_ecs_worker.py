@@ -2,7 +2,7 @@ import json
 import logging
 from functools import partial
 from itertools import product
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from unittest.mock import patch as mock_patch
 from uuid import uuid4
 
@@ -32,6 +32,7 @@ from prefect_aws.workers.ecs_worker import (
 from pydantic import ValidationError
 
 from prefect.client.schemas.objects import FlowRun
+from prefect.exceptions import InfrastructureNotFound
 from prefect.settings import PREFECT_API_AUTH_STRING, PREFECT_API_KEY
 from prefect.settings.context import temporary_settings
 from prefect.utilities.slugify import slugify
@@ -510,6 +511,25 @@ async def test_container_command(
 
 
 @pytest.mark.usefixtures("ecs_mocks")
+async def test_logs_created_task_arn(
+    aws_credentials: AwsCredentials, flow_run: FlowRun, caplog
+):
+    configuration = await construct_configuration(
+        aws_credentials=aws_credentials, command="echo test"
+    )
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        with caplog.at_level(
+            logging.INFO, logger=worker.get_flow_run_logger(flow_run).name
+        ):
+            result = await worker.run(flow_run, configuration)
+
+    _, task_arn = parse_identifier(result.identifier)
+    assert "Created ECS task" in caplog.text
+    assert task_arn in caplog.text
+
+
+@pytest.mark.usefixtures("ecs_mocks")
 async def test_task_definition_arn(
     aws_credentials: AwsCredentials, flow_run: FlowRun, caplog
 ):
@@ -768,6 +788,89 @@ async def test_cluster(
         assert task["clusterArn"].endswith("default")
     else:
         assert task["clusterArn"] == second_cluster_arn
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_cluster_and_launch_type_passed_to_run_task(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """Test that cluster and launchType are explicitly passed to run_task API call."""
+    cluster_arn = "arn:aws:ecs:us-east-1:123456789012:cluster/test-cluster"
+    launch_type = "FARGATE"
+
+    configuration = await construct_configuration(
+        cluster=cluster_arn,
+        launch_type=launch_type,
+        aws_credentials=aws_credentials,
+    )
+
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+    create_test_ecs_cluster(ecs_client, "test-cluster")
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        # Capture the task run call to verify parameters
+        original_run_task = worker._create_task_run
+        mock_run_task = MagicMock(side_effect=original_run_task)
+        worker._create_task_run = mock_run_task
+
+        result = await worker.run(flow_run, configuration)
+
+    # Verify that cluster and launchType were passed in the run_task call
+    run_kwargs = mock_run_task.call_args[0][1]
+    assert run_kwargs.get("cluster") == cluster_arn
+    assert run_kwargs.get("launchType") == launch_type
+
+    # Verify the task was created successfully
+    assert result.status_code == 0
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_cluster_and_launch_type_passed_when_missing_from_template(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """Test that cluster and launchType are added even when missing from templated task_run_request.
+
+    This tests the specific bug scenario where template variables resolve to empty/None
+    but configuration fields are set directly.
+    """
+    cluster_arn = "arn:aws:ecs:us-east-1:123456789012:cluster/test-cluster"
+    launch_type = "FARGATE"
+
+    # Create configuration with cluster and launch_type set
+    configuration = await construct_configuration(
+        cluster=cluster_arn,
+        launch_type=launch_type,
+        aws_credentials=aws_credentials,
+    )
+
+    # Manually remove cluster and launchType from task_run_request to simulate
+    # the bug scenario where template resolution doesn't provide these values
+    if "cluster" in configuration.task_run_request:
+        del configuration.task_run_request["cluster"]
+    if "launchType" in configuration.task_run_request:
+        del configuration.task_run_request["launchType"]
+
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+    create_test_ecs_cluster(ecs_client, "test-cluster")
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        # Capture the task run call to verify parameters
+        original_run_task = worker._create_task_run
+        mock_run_task = MagicMock(side_effect=original_run_task)
+        worker._create_task_run = mock_run_task
+
+        result = await worker.run(flow_run, configuration)
+
+    # Verify that cluster and launchType were added from configuration
+    # even though they were missing from task_run_request
+    run_kwargs = mock_run_task.call_args[0][1]
+    assert run_kwargs.get("cluster") == cluster_arn
+    assert run_kwargs.get("launchType") == launch_type
+
+    # Verify the task was created successfully
+    assert result.status_code == 0
 
 
 @pytest.mark.usefixtures("ecs_mocks")
@@ -1568,6 +1671,130 @@ async def test_worker_caches_registered_task_definitions_no_deployment(
 
 
 @pytest.mark.usefixtures("ecs_mocks")
+async def test_task_definition_container_definition_essential(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """
+    Test to ensure that handling of `essential` setting in container definitions
+    is handled correctly.
+
+    `essential` is an optional field. Without an explicit `False` setting,
+    AWS will default to setting this to `True`. This creates false negatives
+    when comparing task definitions even though they are functionally identical.
+    """
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+
+    # Ensure expected default behavior when `essential` is not set
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition={
+                "containerDefinitions": [
+                    {
+                        "name": ECS_DEFAULT_CONTAINER_NAME,
+                        "image": "{{ image }}",
+                        "essential": True,
+                    },
+                    {"name": "datadog-agent", "image": "datadog/agent"},
+                    {
+                        "name": "log-router",
+                        "image": "public.ecr.aws/aws-observability/fluent-bit:latest",
+                    },
+                ]
+            }
+        ),
+        aws_credentials=aws_credentials,
+    )
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        result = await worker.run(flow_run, configuration)
+
+    _, task_arn = parse_identifier(result.identifier)
+    task = describe_task(ecs_client, task_arn)
+
+    task_definition = describe_task_definition(ecs_client, task)
+
+    # Assert that all containers are marked as essential by default
+    for container in task_definition["containerDefinitions"]:
+        assert container["essential"] is True, (
+            "Containers should be marked as essential by default when not explicitly set."
+        )
+
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition={
+                "containerDefinitions": [
+                    {"name": ECS_DEFAULT_CONTAINER_NAME, "image": "{{ image }}"},
+                    {
+                        "name": "datadog-agent",
+                        "essential": True,
+                        "image": "datadog/agent",
+                    },
+                    {
+                        "name": "log-router",
+                        "essential": False,
+                        "image": "public.ecr.aws/aws-observability/fluent-bit:latest",
+                    },
+                ]
+            }
+        ),
+        aws_credentials=aws_credentials,
+    )
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        result_1 = await worker.run(flow_run, configuration)
+        result_2 = await worker.run(flow_run, configuration)
+
+    _, task_arn_1 = parse_identifier(result_1.identifier)
+    task_1 = describe_task(ecs_client, task_arn_1)
+    _, task_arn_2 = parse_identifier(result_2.identifier)
+    task_2 = describe_task(ecs_client, task_arn_2)
+
+    # Verify both runs use the same task definition ARN (caching works)
+    assert task_1["taskDefinitionArn"] == task_2["taskDefinitionArn"], (
+        "Task definitions should be cached and reused when configuration is identical"
+    )
+    assert flow_run.deployment_id in _TASK_DEFINITION_CACHE
+
+    # Verify the task definition contains expected values
+    task_definition = describe_task_definition(ecs_client, task_1)
+
+    # Verify essential settings
+    assert task_definition["containerDefinitions"][0]["essential"] is True
+    assert task_definition["containerDefinitions"][1]["essential"] is True
+    assert task_definition["containerDefinitions"][2]["essential"] is False
+
+    # Test that a ValueError is thrown when all containers are non-essential
+    with pytest.raises(
+        ValueError,
+        match="At least one container in the task definition must be marked as essential.",
+    ):
+        await construct_configuration_with_job_template(
+            template_overrides=dict(
+                task_definition={
+                    "containerDefinitions": [
+                        {
+                            "name": ECS_DEFAULT_CONTAINER_NAME,
+                            "image": "{{ image }}",
+                            "essential": False,
+                        },
+                        {
+                            "name": "datadog-agent",
+                            "essential": False,
+                            "image": "datadog/agent",
+                        },
+                        {
+                            "name": "log-router",
+                            "essential": False,
+                            "image": "public.ecr.aws/aws-observability/fluent-bit:latest",
+                        },
+                    ]
+                }
+            )
+        )
+
+
+@pytest.mark.usefixtures("ecs_mocks")
 async def test_worker_cache_miss_for_registered_task_definitions_clears_from_cache(
     aws_credentials: AwsCredentials, flow_run: FlowRun
 ):
@@ -2103,6 +2330,56 @@ async def test_user_defined_capacity_provider_strategy_with_launch_type(
 
 
 @pytest.mark.usefixtures("ecs_mocks")
+async def test_ec2_task_definition_with_null_launch_type_uses_cluster_capacity_provider(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """
+    Test that EC2-compatible task definitions can run without an explicit launchType
+    to allow AWS cluster default capacity providers to work.
+
+    Regression test for https://github.com/PrefectHQ/prefect/issues/19627
+    """
+    # Create an EC2-compatible task definition
+    ec2_task_definition = {
+        "containerDefinitions": [
+            {
+                "cpu": 1024,
+                "image": "prefecthq/prefect:3-latest",
+                "memory": 2048,
+                "name": "prefect",
+            },
+        ],
+        "family": "prefect-ec2",
+        "requiresCompatibilities": ["EC2"],
+    }
+
+    # Configure with the EC2 task definition and no launch_type
+    # (simulating user setting launch_type to null to use cluster capacity provider)
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition=ec2_task_definition,
+        ),
+        aws_credentials=aws_credentials,
+    )
+    # Explicitly clear launch_type to simulate user setting it to null
+    configuration.task_run_request["launchType"] = None
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        original_run_task = worker._create_task_run
+        mock_run_task = MagicMock(side_effect=original_run_task)
+        worker._create_task_run = mock_run_task
+
+        result = await worker.run(flow_run, configuration)
+
+    assert result.status_code == 0
+
+    # launchType should NOT be in the request, allowing AWS cluster
+    # default capacity provider to be used
+    run_kwargs = mock_run_task.call_args[0][1]
+    assert "launchType" not in run_kwargs
+
+
+@pytest.mark.usefixtures("ecs_mocks")
 async def test_user_defined_environment_variables_in_task_run_request_template(
     aws_credentials: AwsCredentials, flow_run: FlowRun
 ):
@@ -2209,6 +2486,108 @@ async def test_retry_on_failed_task_start(
         assert run_task_mock.call_count == 3
     finally:
         ecs_client.run_task = original_run_task
+
+
+async def test_retry_on_failed_task_start_with_custom_settings(
+    aws_credentials: AwsCredentials, flow_run, ecs_mocks
+):
+    """Test that custom retry settings are respected when creating ECS task runs."""
+    run_task_mock = MagicMock(
+        return_value={"failures": [{"reason": "RESOURCE:MEMORY"}]}
+    )
+
+    configuration = await construct_configuration(
+        aws_credentials=aws_credentials, command="echo test"
+    )
+
+    ecs_client = configuration.aws_credentials.get_client("ecs")
+    original_run_task = ecs_client.run_task
+    ecs_client.run_task = run_task_mock
+
+    try:
+        with mock_patch.dict(
+            "os.environ",
+            {
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_CREATE_TASK_RUN_MAX_ATTEMPTS": "5",
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_CREATE_TASK_RUN_MIN_DELAY_SECONDS": "0",
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_CREATE_TASK_RUN_MIN_DELAY_JITTER_SECONDS": "0",
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_CREATE_TASK_RUN_MAX_DELAY_JITTER_SECONDS": "0",
+            },
+        ):
+            with catch({RuntimeError: lambda exc_group: None}):
+                async with ECSWorker(work_pool_name="test") as worker:
+                    await worker.run(flow_run, configuration)
+
+            assert run_task_mock.call_count == 5
+    finally:
+        ecs_client.run_task = original_run_task
+
+
+async def test_retry_on_failed_task_definition_registration(
+    aws_credentials: AwsCredentials, flow_run, ecs_mocks
+):
+    register_mock = MagicMock(
+        side_effect=Exception(
+            "An error occurred (ClientException) when calling the "
+            "RegisterTaskDefinition operation: Too many concurrent attempts "
+            "to create a new revision of the specified family."
+        )
+    )
+
+    configuration = await construct_configuration(
+        aws_credentials=aws_credentials, command="echo test"
+    )
+
+    ecs_client = configuration.aws_credentials.get_client("ecs")
+    original_register = ecs_client.register_task_definition
+    ecs_client.register_task_definition = register_mock
+
+    try:
+        with catch({Exception: lambda exc_group: None}):
+            async with ECSWorker(work_pool_name="test") as worker:
+                await worker.run(flow_run, configuration)
+
+        assert register_mock.call_count == 3
+    finally:
+        ecs_client.register_task_definition = original_register
+
+
+async def test_retry_on_failed_task_definition_registration_with_custom_settings(
+    aws_credentials: AwsCredentials, flow_run, ecs_mocks
+):
+    """Test that custom retry settings are respected when registering ECS task definitions."""
+    register_mock = MagicMock(
+        side_effect=Exception(
+            "An error occurred (ClientException) when calling the "
+            "RegisterTaskDefinition operation: Too many concurrent attempts "
+            "to create a new revision of the specified family."
+        )
+    )
+
+    configuration = await construct_configuration(
+        aws_credentials=aws_credentials, command="echo test"
+    )
+
+    ecs_client = configuration.aws_credentials.get_client("ecs")
+    original_register = ecs_client.register_task_definition
+    ecs_client.register_task_definition = register_mock
+
+    try:
+        with mock_patch.dict(
+            "os.environ",
+            {
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_REGISTER_TASK_DEFINITION_MAX_ATTEMPTS": "5",
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_REGISTER_TASK_DEFINITION_INITIAL_DELAY_SECONDS": "0",
+                "PREFECT_INTEGRATIONS_AWS_ECS_WORKER_REGISTER_TASK_DEFINITION_MAX_DELAY_SECONDS": "0",
+            },
+        ):
+            with catch({Exception: lambda exc_group: None}):
+                async with ECSWorker(work_pool_name="test") as worker:
+                    await worker.run(flow_run, configuration)
+
+            assert register_mock.call_count == 5
+    finally:
+        ecs_client.register_task_definition = original_register
 
 
 async def test_mask_sensitive_env_values():
@@ -2603,3 +2982,270 @@ async def test_run_task_with_both_secrets(
         for env in task["overrides"]["containerOverrides"][0]["environment"]
         if env["name"] in ["PREFECT_API_KEY", "PREFECT_API_AUTH_STRING"]
     )
+
+
+@pytest.mark.usefixtures("ecs_mocks", "prefect_both_secrets_setting")
+async def test_secrets_in_task_definition_are_preserved(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """Secrets already on the container are kept when Prefect adds its own."""
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition={
+                "containerDefinitions": [
+                    {
+                        "name": ECS_DEFAULT_CONTAINER_NAME,
+                        "image": "{{ image }}",
+                        "secrets": [
+                            {
+                                "name": "MY_DATABASE_PASSWORD",
+                                "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+                            },
+                            {
+                                "name": "MY_API_TOKEN",
+                                "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:api-token",
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        aws_credentials=aws_credentials,
+        prefect_api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-key",
+        prefect_api_auth_string_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-auth-string",
+    )
+    configuration.prepare_for_flow_run(flow_run)
+
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+    async with ECSWorker(work_pool_name="test") as worker:
+        result = await worker.run(flow_run, configuration)
+
+    _, task_arn = parse_identifier(result.identifier)
+    task = describe_task(ecs_client, task_arn)
+    task_definition = describe_task_definition(ecs_client, task)
+
+    secrets = task_definition["containerDefinitions"][0]["secrets"]
+
+    assert sorted(secrets, key=lambda secret: secret["name"]) == [
+        {
+            "name": "MY_API_TOKEN",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:api-token",
+        },
+        {
+            "name": "MY_DATABASE_PASSWORD",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+        },
+        {
+            "name": "PREFECT_API_AUTH_STRING",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-auth-string",
+        },
+        {
+            "name": "PREFECT_API_KEY",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-key",
+        },
+    ]
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_secrets_in_task_definition_are_preserved_without_prefect_secrets(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """Secrets on the container survive when no secret ARNs are configured."""
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition={
+                "containerDefinitions": [
+                    {
+                        "name": ECS_DEFAULT_CONTAINER_NAME,
+                        "image": "{{ image }}",
+                        "secrets": [
+                            {
+                                "name": "MY_DATABASE_PASSWORD",
+                                "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        aws_credentials=aws_credentials,
+    )
+
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+    async with ECSWorker(work_pool_name="test") as worker:
+        result = await worker.run(flow_run, configuration)
+
+    _, task_arn = parse_identifier(result.identifier)
+    task = describe_task(ecs_client, task_arn)
+    task_definition = describe_task_definition(ecs_client, task)
+
+    assert task_definition["containerDefinitions"][0]["secrets"] == [
+        {
+            "name": "MY_DATABASE_PASSWORD",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+        }
+    ]
+
+
+@pytest.mark.usefixtures("ecs_mocks", "prefect_api_key_setting")
+async def test_secret_arn_replaces_matching_secret_in_task_definition(
+    aws_credentials: AwsCredentials, flow_run: FlowRun
+):
+    """A configured secret ARN wins over a same-named secret in the task definition."""
+    configuration = await construct_configuration_with_job_template(
+        template_overrides=dict(
+            task_definition={
+                "containerDefinitions": [
+                    {
+                        "name": ECS_DEFAULT_CONTAINER_NAME,
+                        "image": "{{ image }}",
+                        "secrets": [
+                            {
+                                "name": "PREFECT_API_KEY",
+                                "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:stale-api-key",
+                            },
+                            {
+                                "name": "MY_DATABASE_PASSWORD",
+                                "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        aws_credentials=aws_credentials,
+        prefect_api_key_secret_arn="arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-key",
+    )
+    configuration.prepare_for_flow_run(flow_run)
+
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+    async with ECSWorker(work_pool_name="test") as worker:
+        result = await worker.run(flow_run, configuration)
+
+    _, task_arn = parse_identifier(result.identifier)
+    task = describe_task(ecs_client, task_arn)
+    task_definition = describe_task_definition(ecs_client, task)
+
+    assert task_definition["containerDefinitions"][0]["secrets"] == [
+        {
+            "name": "PREFECT_API_KEY",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:prefect-worker-api-key",
+        },
+        {
+            "name": "MY_DATABASE_PASSWORD",
+            "valueFrom": "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-password",
+        },
+    ]
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_kill_infrastructure_stops_task(aws_credentials, flow_run):
+    """Test that kill_infrastructure successfully stops an ECS task."""
+    session = aws_credentials.get_boto3_session()
+    ecs_client = session.client("ecs")
+
+    # Register task definition and run a task
+    ecs_client.register_task_definition(**TEST_TASK_DEFINITION)
+
+    response = ecs_client.run_task(
+        cluster="default",
+        taskDefinition="prefect",
+        launchType="FARGATE",
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": ["subnet-12345"],
+                "securityGroups": ["sg-12345"],
+            }
+        },
+    )
+    task_arn = response["tasks"][0]["taskArn"]
+    infrastructure_pid = f"default::{task_arn}"
+
+    configuration = await construct_configuration(aws_credentials=aws_credentials)
+    configuration.prepare_for_flow_run(flow_run)
+
+    async with ECSWorker(work_pool_name="test") as worker:
+        await worker.kill_infrastructure(
+            infrastructure_pid=infrastructure_pid,
+            configuration=configuration,
+            grace_seconds=30,
+        )
+
+    # Verify task was stopped
+    tasks = ecs_client.describe_tasks(cluster="default", tasks=[task_arn])
+    assert tasks["tasks"][0]["lastStatus"] in ["STOPPED", "DEPROVISIONING"]
+
+
+@pytest.mark.usefixtures("ecs_mocks")
+async def test_kill_infrastructure_raises_not_found(aws_credentials, flow_run):
+    """Test that kill_infrastructure raises InfrastructureNotFound for non-existent task."""
+    fake_task_arn = "arn:aws:ecs:us-east-1:123456789012:task/default/fake-task-id"
+    infrastructure_pid = f"default::{fake_task_arn}"
+
+    configuration = await construct_configuration(aws_credentials=aws_credentials)
+    configuration.prepare_for_flow_run(flow_run)
+
+    # Create a mock ECS client that raises InvalidParameterException
+    mock_ecs_client = MagicMock()
+    mock_ecs_client.exceptions.InvalidParameterException = type(
+        "InvalidParameterException", (Exception,), {}
+    )
+    mock_ecs_client.stop_task.side_effect = (
+        mock_ecs_client.exceptions.InvalidParameterException("The task was not found.")
+    )
+
+    with patch.object(
+        configuration.aws_credentials, "get_client", return_value=mock_ecs_client
+    ):
+        async with ECSWorker(work_pool_name="test") as worker:
+            with pytest.raises(InfrastructureNotFound):
+                await worker.kill_infrastructure(
+                    infrastructure_pid=infrastructure_pid,
+                    configuration=configuration,
+                    grace_seconds=30,
+                )
+
+
+class TestReportTaskRunCreationFailure:
+    """Tests for _report_task_run_creation_failure error handling."""
+
+    @staticmethod
+    def _call(configuration, task_run, exc):
+        worker = ECSWorker.__new__(ECSWorker)
+        try:
+            raise exc
+        except Exception:
+            worker._report_task_run_creation_failure(configuration, task_run, exc)
+
+    @pytest.mark.parametrize(
+        "message,expected_match",
+        [
+            ("TaskDefinition is inactive", "task definition is inactive"),
+            ("No capacity is available", "capacity provider error"),
+            ("The Capacity Provider strategy is invalid", "capacity provider error"),
+            (
+                "InvalidParameterException: The subnet ID 'subnet-xxx' does not exist",
+                "network configuration error",
+            ),
+            (
+                "InvalidParameterException: The security group 'sg-xxx' does not exist",
+                "network configuration error",
+            ),
+            (
+                "InvalidParameterException: The network configuration is invalid",
+                "network configuration error",
+            ),
+        ],
+    )
+    def test_known_error_messages(self, message, expected_match):
+        exc = Exception(message)
+        with pytest.raises(RuntimeError, match=expected_match):
+            self._call(MagicMock(), {}, exc)
+
+    def test_unknown_error_reraised(self):
+        exc = Exception("Something completely unexpected")
+        with pytest.raises(Exception, match="Something completely unexpected"):
+            self._call(MagicMock(), {}, exc)

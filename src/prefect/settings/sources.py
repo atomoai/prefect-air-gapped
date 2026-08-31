@@ -1,11 +1,11 @@
 import os
 import sys
+import threading
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, get_origin
 
 import dotenv
-import toml
 from cachetools import TTLCache
 from pydantic import AliasChoices
 from pydantic.fields import FieldInfo
@@ -15,26 +15,35 @@ from pydantic_settings import (
     EnvSettingsSource,
     PydanticBaseSettingsSource,
 )
+from pydantic_settings.exceptions import SettingsError
 from pydantic_settings.sources import (
     ENV_FILE_SENTINEL,
     ConfigFileSourceMixin,
     DotenvType,
 )
 
+from prefect._internal.compatibility.backports import tomllib
 from prefect.settings.constants import DEFAULT_PREFECT_HOME, DEFAULT_PROFILES_PATH
 from prefect.utilities.collections import get_from_dict
 
 _file_cache: TTLCache[str, dict[str, Any]] = TTLCache(maxsize=100, ttl=60)
+_file_cache_lock = threading.Lock()
 
 
 def _read_toml_file(path: Path) -> dict[str, Any]:
-    """use ttl cache to cache toml files"""
+    """use ttl cache to cache toml files
+
+    `TTLCache` is not thread-safe, so all access is guarded by a lock to avoid
+    corrupting its internal state under concurrent settings loads.
+    """
     modified_time = path.stat().st_mtime
     cache_key = f"toml_file:{path}:{modified_time}"
-    if value := _file_cache.get(cache_key):
-        return value
-    data = toml.load(path)  # type: ignore
-    _file_cache[cache_key] = data
+    with _file_cache_lock:
+        if value := _file_cache.get(cache_key):
+            return value
+    data = tomllib.loads(path.read_text(encoding="utf-8"))  # type: ignore
+    with _file_cache_lock:
+        _file_cache[cache_key] = data
     return data
 
 
@@ -60,13 +69,13 @@ class EnvFilterSettingsSource(EnvSettingsSource):
         env_filter: Optional[List[str]] = None,
     ) -> None:
         super().__init__(
-            settings_cls,
-            case_sensitive,
-            env_prefix,
-            env_nested_delimiter,
-            env_ignore_empty,
-            env_parse_none_str,
-            env_parse_enums,
+            settings_cls=settings_cls,
+            case_sensitive=case_sensitive,
+            env_prefix=env_prefix,
+            env_nested_delimiter=env_nested_delimiter,
+            env_ignore_empty=env_ignore_empty,
+            env_parse_none_str=env_parse_none_str,
+            env_parse_enums=env_parse_enums,
         )
         self.env_vars: Mapping[str, str | None]
         if env_filter:
@@ -96,15 +105,15 @@ class FilteredDotEnvSettingsSource(DotEnvSettingsSource):
         env_blacklist: Optional[List[str]] = None,
     ) -> None:
         super().__init__(
-            settings_cls,
-            env_file,
-            env_file_encoding,
-            case_sensitive,
-            env_prefix,
-            env_nested_delimiter,
-            env_ignore_empty,
-            env_parse_none_str,
-            env_parse_enums,
+            settings_cls=settings_cls,
+            env_file=env_file,
+            env_file_encoding=env_file_encoding,
+            case_sensitive=case_sensitive,
+            env_prefix=env_prefix,
+            env_nested_delimiter=env_nested_delimiter,
+            env_ignore_empty=env_ignore_empty,
+            env_parse_none_str=env_parse_none_str,
+            env_parse_enums=env_parse_enums,
         )
         self.env_blacklist = env_blacklist
         if self.env_blacklist:
@@ -139,7 +148,7 @@ class ProfileSettingsTomlLoader(PydanticBaseSettingsSource):
 
         try:
             all_profile_data = _read_toml_file(self.profiles_path)
-        except toml.TomlDecodeError:
+        except tomllib.TOMLDecodeError:
             warnings.warn(
                 f"Failed to load profiles from {self.profiles_path}. Please ensure the file is valid TOML."
             )
@@ -230,16 +239,30 @@ class TomlConfigSettingsSourceBase(PydanticBaseSettingsSource, ConfigFileSourceM
         self.toml_data: dict[str, Any] = {}
 
     def _read_file(self, path: Path) -> dict[str, Any]:
-        return _read_toml_file(path)
+        try:
+            return _read_toml_file(path)
+        except tomllib.TOMLDecodeError as e:
+            raise SettingsError(
+                f"Failed to load Prefect settings from {path}: invalid TOML ({e})"
+            ) from e
+
+    @staticmethod
+    def _field_is_dict_type(field: FieldInfo) -> bool:
+        """Return True if the field's annotation is a dict type."""
+        annotation = field.annotation
+        if annotation is None:
+            return False
+        return get_origin(annotation) is dict or annotation is dict
 
     def get_field_value(
         self, field: FieldInfo, field_name: str
     ) -> tuple[Any, str, bool]:
         """Concrete implementation to get the field value from toml data"""
         value = self.toml_data.get(field_name)
-        if isinstance(value, dict):
-            # if the value is a dict, it is likely a nested settings object and a nested
-            # source will handle it
+        if isinstance(value, dict) and not self._field_is_dict_type(field):
+            # Dict values from TOML are likely nested settings objects and a
+            # nested source will handle them — but not if the field itself
+            # is typed as a dict (e.g. dict[str, ...]).
             value = None
         name = field_name
         # Use validation alias as the key to ensure profile value does not
@@ -257,6 +280,18 @@ class TomlConfigSettingsSourceBase(PydanticBaseSettingsSource, ConfigFileSourceM
                         name = alias
                         break
         return value, name, self.field_is_complex(field)
+
+    def prepare_field_value(
+        self,
+        field_name: str,
+        field: FieldInfo,
+        value: Any,
+        value_is_complex: bool,
+    ) -> Any:
+        """Override to skip JSON decoding for dict values already parsed from TOML."""
+        if isinstance(value, dict) and self._field_is_dict_type(field):
+            return value
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
 
     def __call__(self) -> dict[str, Any]:
         """Called by pydantic to get the settings from our custom source"""
@@ -324,7 +359,9 @@ def _get_profiles_path() -> Path:
         return DEFAULT_PROFILES_PATH
     if env_path := os.getenv("PREFECT_PROFILES_PATH"):
         return Path(env_path)
-    if dotenv_path := dotenv.dotenv_values(".env").get("PREFECT_PROFILES_PATH"):
+    if Path(".env").is_file() and (
+        dotenv_path := dotenv.dotenv_values(".env").get("PREFECT_PROFILES_PATH")
+    ):
         return Path(dotenv_path)
     if toml_path := _get_profiles_path_from_toml("prefect.toml", ["profiles_path"]):
         return Path(toml_path)

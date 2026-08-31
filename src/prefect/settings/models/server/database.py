@@ -66,6 +66,16 @@ class SQLAlchemyConnectArgsSettings(PrefectBaseSettings):
         description="Controls the application_name field for connections opened from the connection pool when using a PostgreSQL database with the Prefect backend.",
     )
 
+    search_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "PostgreSQL schema name to set in search_path when using a PostgreSQL "
+            "database with the Prefect backend. Note: The public schema should be "
+            "included in the search path (e.g. 'myschema, public') to ensure that "
+            "pg_trgm and other extensions remain available."
+        ),
+    )
+
     statement_cache_size: Optional[int] = Field(
         default=None,
         description="Controls statement cache size for PostgreSQL connections. Setting this to 0 is required when using PgBouncer in transaction mode. Defaults to None.",
@@ -268,6 +278,12 @@ class ServerDatabaseSettings(PrefectBaseSettings):
             "prefect_server_database_connection_timeout",
             "prefect_api_database_connection_timeout",
         ),
+    )
+
+    migration_timeout: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="A statement timeout, in seconds, applied to database migrations. Schema changes such as concurrent index builds on large tables can take much longer than an ordinary API query, so migrations are not bound by `server.database.timeout`. Defaults to `None` (no timeout); set a positive value to bound migration statement duration.",
     )
 
     # handle deprecated fields

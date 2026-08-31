@@ -1,6 +1,7 @@
 ---
 title: How to customize Prefect's logging configuration
 sidebarTitle: Customize logging
+keywords: ["logging", "custom handler", "log level", "log format", "structured logging"]
 ---
 
 Prefect relies on [the standard Python implementation of logging configuration](https://docs.python.org/3/library/logging.config.html).
@@ -32,7 +33,7 @@ In some situations you may want to completely overhaul the Prefect logging confi
 You can create your own version of `logging.yml` in one of two ways:
 
 1. Create a `logging.yml` file in your `PREFECT_HOME` directory (default is `~/.prefect`).
-2. Specify a custom path to your `logging.yml` file using the `PREFECT_LOGGING_SETTINGS_PATH` setting.
+2. Specify a custom path to your `logging.yml` file using the `PREFECT_LOGGING_CONFIG_PATH` setting.
 
 If Prefect cannot find the `logging.yml` file at the specified location, it will fall back to using the default logging configuration.
 
@@ -60,6 +61,7 @@ The flow run logger has the following variables available for formatting:
 - `flow_run_name`
 - `flow_run_id`
 - `flow_name`
+- `deployment_name`
 
 The task run logger has the following variables available for formatting:
 

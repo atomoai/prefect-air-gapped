@@ -24,6 +24,19 @@ from prefect.utilities.importtools import (
 TEST_PROJECTS_DIR = __development_base_path__ / "tests" / "test-projects"
 
 
+@pytest.fixture(autouse=True)
+def isolate_sys_path():
+    """Fixture to isolate sys.path between tests.
+
+    load_script_as_module adds paths to sys.path but doesn't clean them up
+    (intentional behavior since PR #17524 to support multiprocessing). This
+    fixture ensures tests don't pollute each other's sys.path.
+    """
+    original_sys_path = sys.path.copy()
+    yield
+    sys.path[:] = original_sys_path
+
+
 def my_fn():
     pass
 
@@ -135,12 +148,6 @@ def test_lazy_import_includes_help_message_in_deferred_failure():
         (TEST_PROJECTS_DIR / "nested-project", "explicit_relative.py"),
         # The tree structure requires the working directory to be at the base
         (TEST_PROJECTS_DIR / "tree-project", Path("imports") / "implicit_relative.py"),
-        # below are cases that used to fail; see https://github.com/PrefectHQ/prefect/pull/17524
-        (
-            TEST_PROJECTS_DIR,
-            Path("tree-project") / "imports" / "implicit_relative.py",
-        ),
-        (TEST_PROJECTS_DIR / "tree-project" / "imports", "implicit_relative.py"),
     ],
 )
 def test_import_object_from_script_with_relative_imports(
@@ -151,6 +158,40 @@ def test_import_object_from_script_with_relative_imports(
 
     assert callable(foobar), f"Expected callable, got {foobar!r}"
     assert foobar() == "foobar"
+
+
+@pytest.mark.parametrize(
+    "working_directory,script_path",
+    [
+        # These cases require tree-project to be in sys.path for shared_libs to be found.
+        # They work when tree-project is accessible via sys.path (e.g., from prior test
+        # pollution or explicit setup). We test them separately with explicit path setup.
+        # See https://github.com/PrefectHQ/prefect/pull/17524
+        (
+            TEST_PROJECTS_DIR,
+            Path("tree-project") / "imports" / "implicit_relative.py",
+        ),
+        (TEST_PROJECTS_DIR / "tree-project" / "imports", "implicit_relative.py"),
+    ],
+)
+def test_import_object_from_script_with_relative_imports_needs_tree_project_in_path(
+    working_directory, script_path
+):
+    """Test cases that require tree-project in sys.path for shared_libs imports.
+
+    These cases have working directories that don't include tree-project itself,
+    so we need to explicitly add it to sys.path for the shared_libs import to work.
+    """
+    tree_project_path = str(TEST_PROJECTS_DIR / "tree-project")
+    sys.path.insert(0, tree_project_path)
+    try:
+        with tmpchdir(working_directory):
+            foobar = import_object(f"{script_path}:foobar")
+
+        assert callable(foobar), f"Expected callable, got {foobar!r}"
+        assert foobar() == "foobar"
+    finally:
+        sys.path.remove(tree_project_path)
 
 
 @pytest.mark.parametrize(
@@ -179,8 +220,6 @@ def test_import_object_from_script_with_relative_imports_expected_failures(
         (TEST_PROJECTS_DIR / "flat-project", "implicit_relative.foobar"),
         (TEST_PROJECTS_DIR / "nested-project", "implicit_relative.foobar"),
         (TEST_PROJECTS_DIR / "tree-project", "imports.implicit_relative.foobar"),
-        # below are cases that used to fail; see https://github.com/PrefectHQ/prefect/pull/17524
-        (TEST_PROJECTS_DIR, "implicit_relative.foobar"),
     ],
 )
 def test_import_object_from_module_with_relative_imports(
@@ -189,6 +228,23 @@ def test_import_object_from_module_with_relative_imports(
     with tmpchdir(working_directory):
         foobar = import_object(import_path)
         assert foobar() == "foobar"
+
+
+def test_import_object_from_module_with_relative_imports_needs_flat_project_in_path():
+    """Test case that requires flat-project in sys.path for implicit_relative import.
+
+    This case has TEST_PROJECTS_DIR as working directory but needs flat-project
+    in sys.path for the implicit_relative module to be found.
+    See https://github.com/PrefectHQ/prefect/pull/17524
+    """
+    flat_project_path = str(TEST_PROJECTS_DIR / "flat-project")
+    sys.path.insert(0, flat_project_path)
+    try:
+        with tmpchdir(TEST_PROJECTS_DIR):
+            foobar = import_object("implicit_relative.foobar")
+            assert foobar() == "foobar"
+    finally:
+        sys.path.remove(flat_project_path)
 
 
 @pytest.mark.parametrize(
@@ -343,6 +399,48 @@ def test_safe_load_namespace_implicit_relative_imports():
     namespace = safe_load_namespace(source_code, filepath=str(path))
     assert "get_foo" in namespace
     assert "get_bar" in namespace
+
+
+def test_load_script_as_module_does_not_leak_sys_modules_on_repeated_loads(
+    tmp_path: Path,
+):
+    """Regression: `load_script_as_module` fell back to `__prefect_loader_{id(path)}__`
+    when the simple filename-derived module name was already claimed. `id(path)` is
+    the id of the *Python string object* passed in -- fresh on every call -- so
+    repeated loads of the same file (e.g. `Flow.afrom_source` in a loop against a
+    fresh tmpdir) added a new `sys.modules` entry every iteration, never popping
+    prior ones. Unbounded growth in long-running deploy scripts.
+    """
+    # First, make the simple name collide so the fallback path is exercised.
+    # The fixture gives us a fresh tmpdir; put two separate directories inside
+    # so both have a my_flow.py with different content.
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "my_flow.py").write_text("x = 1\n")
+    (dir_b / "my_flow.py").write_text("x = 2\n")
+
+    before = set(sys.modules)
+    try:
+        # Claims sys.modules["my_flow"].
+        load_script_as_module(str(dir_a / "my_flow.py"))
+        # Each of these hits the fallback because "my_flow" is already taken.
+        # With the bug, every call allocates a new __prefect_loader_{id}__ key
+        # because `id(str(dir_b / "my_flow.py"))` is fresh each call.
+        for _ in range(5):
+            load_script_as_module(str(dir_b / "my_flow.py"))
+        added = set(sys.modules) - before
+    finally:
+        for k in set(sys.modules) - before:
+            sys.modules.pop(k, None)
+
+    # Expected: one "my_flow" slot (from dir_a) + one stable fallback slot (dir_b).
+    # With the bug: 1 + 5 = 6 slots.
+    assert len(added) <= 2, (
+        f"load_script_as_module leaked {len(added)} sys.modules entries for "
+        f"repeated loads of the same file: {sorted(added)}"
+    )
 
 
 def test_concurrent_script_loading(tmpdir: Path):

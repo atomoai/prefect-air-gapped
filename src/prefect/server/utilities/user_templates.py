@@ -1,9 +1,14 @@
 """Utilities to support safely rendering user-supplied templates"""
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
-from jinja2 import ChainableUndefined, nodes
+from jinja2 import ChainableUndefined, nodes, pass_eval_context
+from jinja2.nodes import EvalContext
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+from jinja2.utils import htmlsafe_json_dumps
+from markupsafe import Markup
+from pydantic import BaseModel
 
 from prefect.logging import get_logger
 
@@ -29,11 +34,43 @@ def _check_template_range(*args: int) -> range:
     return rng
 
 
+def _prepare_value_for_json(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return _prepare_value_for_json(value.model_dump(mode="json"))
+    elif isinstance(value, Mapping):
+        return {
+            key: _prepare_value_for_json(nested_value)
+            for key, nested_value in value.items()
+        }
+    elif isinstance(value, list):
+        return [_prepare_value_for_json(nested_value) for nested_value in value]
+    elif isinstance(value, tuple):
+        return tuple(_prepare_value_for_json(nested_value) for nested_value in value)
+    else:
+        return value
+
+
+@pass_eval_context
+def _tojson(
+    eval_ctx: EvalContext, value: object, indent: Optional[int] = None
+) -> Markup:
+    policies = eval_ctx.environment.policies
+    dumps = policies["json.dumps_function"]
+    kwargs = policies["json.dumps_kwargs"]
+
+    if indent is not None:
+        kwargs = kwargs.copy()
+        kwargs["indent"] = indent
+
+    return htmlsafe_json_dumps(_prepare_value_for_json(value), dumps=dumps, **kwargs)
+
+
 class UserTemplateEnvironment(ImmutableSandboxedEnvironment):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # Override the range function to limit its size
         self.globals["range"] = _check_template_range  # type: ignore
+        self.filters["tojson"] = _tojson
 
 
 _template_environment = UserTemplateEnvironment(
@@ -66,9 +103,21 @@ class TemplateSecurityError(Exception):
         super().__init__(message)
 
 
+class TemplateRenderError(Exception):
+    """Raised when a user-supplied template fails to render."""
+
+    def __init__(self, error: Exception, template: str) -> None:
+        self.error = error
+        self.template = template
+        super().__init__(
+            f"Failed to render template due to the following error: {error!r}"
+        )
+
+
 def register_user_template_filters(filters: dict[str, Any]) -> None:
     """Register additional filters that will be available to user templates"""
     _template_environment.filters.update(filters)
+    _sync_template_environment.filters.update(filters)
 
 
 def validate_user_template(template: str) -> None:
@@ -134,10 +183,7 @@ async def render_user_template(template: str, context: dict[str, Any]) -> str:
         return await loaded.render_async(context)
     except Exception as e:
         logger.warning("Unhandled exception rendering template", exc_info=True)
-        return (
-            f"Failed to render template due to the following error: {e!r}\n"
-            "Template source:\n"
-        ) + template
+        raise TemplateRenderError(e, template) from e
 
 
 def render_user_template_sync(template: str, context: dict[str, Any]) -> str:
@@ -149,7 +195,4 @@ def render_user_template_sync(template: str, context: dict[str, Any]) -> str:
         return loaded.render(context)
     except Exception as e:
         logger.warning("Unhandled exception rendering template", exc_info=True)
-        return (
-            f"Failed to render template due to the following error: {e!r}\n"
-            "Template source:\n"
-        ) + template
+        raise TemplateRenderError(e, template) from e

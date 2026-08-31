@@ -19,6 +19,11 @@ class ServerUISettings(PrefectBaseSettings):
         ),
     )
 
+    v2_enabled: bool = Field(
+        default=True,
+        description="Whether neutral UI entry points should default to the V2 UI instead of V1 when the browser has no saved UI preference. Set to false to restore V1 as the default for browsers without a saved preference.",
+    )
+
     api_url: Optional[str] = Field(
         default=None,
         description="The connection url for communication from the UI to the API. Defaults to `PREFECT_API_URL` if set. Otherwise, the default URL is generated from `PREFECT_SERVER_API_HOST` and `PREFECT_SERVER_API_PORT`.",

@@ -14,6 +14,8 @@ from prefect.runtime import flow_run
 from prefect.settings import PREFECT_API_URL, PREFECT_UI_URL
 from prefect.types._datetime import now
 
+pytestmark = pytest.mark.clear_db
+
 
 class TestAttributeAccessPatterns:
     async def test_access_unknown_attribute_fails(self):
@@ -128,6 +130,12 @@ class TestID:
             task_run=TaskRun.model_construct(flow_run_id="foo")
         ):
             assert flow_run.id == "foo"
+
+    async def test_id_is_none_in_task_run_context_without_flow_run(self):
+        with TaskRunContext.model_construct(
+            task_run=TaskRun.model_construct(flow_run_id=None)
+        ):
+            assert flow_run.id is None
 
 
 class TestTags:
@@ -616,7 +624,7 @@ class TestURL:
         assert getattr(flow_run, url_type) is None
 
     @pytest.mark.parametrize(
-        "url_type,",
+        "url_type",
         ["api_url", "ui_url"],
     )
     async def test_url_returns_correct_url_when_id_present(
@@ -641,7 +649,7 @@ class TestURL:
         assert not getattr(flow_run, url_type)
 
     @pytest.mark.parametrize(
-        "url_type,",
+        "url_type",
         ["api_url", "ui_url"],
     )
     async def test_url_pulls_from_api_when_needed(

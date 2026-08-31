@@ -47,6 +47,7 @@ from prefect.settings import (
 )
 from prefect.types._datetime import now
 from prefect.utilities.dockerutils import get_prefect_image_name
+from prefect.utilities.processutils import command_to_string
 
 FAKE_CLUSTER = "fake-cluster"
 MOCK_CLUSTER_UID = "1234"
@@ -262,6 +263,10 @@ from_template_and_values_cases = [
                                 {
                                     "name": "prefect-job",
                                     "imagePullPolicy": "IfNotPresent",
+                                    "resources": {
+                                        "limits": {},
+                                        "requests": {},
+                                    },
                                 }
                             ],
                         }
@@ -273,115 +278,156 @@ from_template_and_values_cases = [
             pod_watch_timeout_seconds=60,
             stream_output=True,
         ),
-        lambda flow_run,
-        deployment,
-        flow,
-        work_pool,
-        worker_name: KubernetesWorkerJobConfiguration(
-            command="prefect flow-run execute",
-            env={
-                **get_current_settings().to_environment_variables(exclude_unset=True),
-                "PREFECT__FLOW_RUN_ID": str(flow_run.id),
-                "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule",
-            },
-            labels={
-                "prefect.io/flow-run-id": str(flow_run.id),
-                "prefect.io/flow-run-name": flow_run.name,
-                "prefect.io/version": _slugify_label_value(
-                    prefect.__version__.split("+")[0]
-                ),
-                "prefect.io/deployment-id": str(deployment.id),
-                "prefect.io/deployment-name": deployment.name,
-                "prefect.io/flow-id": str(flow.id),
-                "prefect.io/flow-name": flow.name,
-                "prefect.io/worker-name": worker_name,
-                "prefect.io/work-pool-name": work_pool.name,
-                "prefect.io/work-pool-id": str(work_pool.id),
-            },
-            name=flow_run.name,
-            namespace="default",
-            job_manifest={
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": {
-                    "namespace": "default",
-                    "generateName": f"{flow_run.name}-",
-                    "labels": {
-                        "prefect.io/flow-run-id": str(flow_run.id),
-                        "prefect.io/flow-run-name": flow_run.name,
-                        "prefect.io/version": _slugify_label_value(
-                            prefect.__version__.split("+")[0]
-                        ),
-                        "prefect.io/deployment-id": str(deployment.id),
-                        "prefect.io/deployment-name": deployment.name,
-                        "prefect.io/flow-id": str(flow.id),
-                        "prefect.io/flow-name": flow.name,
-                        "prefect.io/worker-name": worker_name,
-                        "prefect.io/work-pool-name": work_pool.name,
-                        "prefect.io/work-pool-id": str(work_pool.id),
-                    },
+        lambda flow_run, deployment, flow, work_pool, worker_name: (
+            KubernetesWorkerJobConfiguration(
+                command="prefect flow-run execute",
+                env={
+                    **get_current_settings().to_environment_variables(
+                        exclude_unset=True
+                    ),
+                    "PREFECT__FLOW_RUN_ID": str(flow_run.id),
+                    **KubernetesWorkerJobConfiguration._base_attribution_environment(
+                        flow_run=flow_run,
+                        deployment=deployment,
+                        flow=flow,
+                        worker_name=worker_name,
+                    ),
+                    "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule",
                 },
-                "spec": {
-                    "backoffLimit": 0,
-                    "template": {
-                        "metadata": {
-                            "labels": {
-                                "prefect.io/flow-run-id": str(flow_run.id),
-                                "prefect.io/flow-run-name": flow_run.name,
-                                "prefect.io/version": _slugify_label_value(
-                                    prefect.__version__.split("+")[0]
-                                ),
-                                "prefect.io/deployment-id": str(deployment.id),
-                                "prefect.io/deployment-name": deployment.name,
-                                "prefect.io/flow-id": str(flow.id),
-                                "prefect.io/flow-name": flow.name,
-                                "prefect.io/worker-name": worker_name,
-                                "prefect.io/work-pool-name": work_pool.name,
-                                "prefect.io/work-pool-id": str(work_pool.id),
+                labels={
+                    "prefect.io/flow-run-id": str(flow_run.id),
+                    "prefect.io/flow-run-name": flow_run.name,
+                    "prefect.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "prefect.io/deployment-id": str(deployment.id),
+                    "prefect.io/deployment-name": deployment.name,
+                    "prefect.io/flow-id": str(flow.id),
+                    "prefect.io/flow-name": flow.name,
+                    "prefect.io/worker-name": worker_name,
+                    "prefect.io/work-pool-name": work_pool.name,
+                    "prefect.io/work-pool-id": str(work_pool.id),
+                    "app.kubernetes.io/managed-by": "prefect",
+                    "app.kubernetes.io/part-of": "prefect",
+                    "app.kubernetes.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "app.kubernetes.io/name": _slugify_label_value(deployment.name),
+                },
+                name=flow_run.name,
+                namespace="default",
+                job_manifest={
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "namespace": "default",
+                        "generateName": f"{flow_run.name}-",
+                        "labels": {
+                            "prefect.io/flow-run-id": str(flow_run.id),
+                            "prefect.io/flow-run-name": flow_run.name,
+                            "prefect.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "prefect.io/deployment-id": str(deployment.id),
+                            "prefect.io/deployment-name": deployment.name,
+                            "prefect.io/flow-id": str(flow.id),
+                            "prefect.io/flow-name": flow.name,
+                            "prefect.io/worker-name": worker_name,
+                            "prefect.io/work-pool-name": work_pool.name,
+                            "prefect.io/work-pool-id": str(work_pool.id),
+                            "app.kubernetes.io/managed-by": "prefect",
+                            "app.kubernetes.io/part-of": "prefect",
+                            "app.kubernetes.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "app.kubernetes.io/name": _slugify_label_value(
+                                deployment.name
+                            ),
+                        },
+                    },
+                    "spec": {
+                        "backoffLimit": 0,
+                        "template": {
+                            "metadata": {
+                                "labels": {
+                                    "prefect.io/flow-run-id": str(flow_run.id),
+                                    "prefect.io/flow-run-name": flow_run.name,
+                                    "prefect.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "prefect.io/deployment-id": str(deployment.id),
+                                    "prefect.io/deployment-name": deployment.name,
+                                    "prefect.io/flow-id": str(flow.id),
+                                    "prefect.io/flow-name": flow.name,
+                                    "prefect.io/worker-name": worker_name,
+                                    "prefect.io/work-pool-name": work_pool.name,
+                                    "prefect.io/work-pool-id": str(work_pool.id),
+                                    "app.kubernetes.io/managed-by": "prefect",
+                                    "app.kubernetes.io/part-of": "prefect",
+                                    "app.kubernetes.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "app.kubernetes.io/name": _slugify_label_value(
+                                        deployment.name
+                                    ),
+                                },
+                            },
+                            "spec": {
+                                "parallelism": 1,
+                                "completions": 1,
+                                "restartPolicy": "Never",
+                                "containers": [
+                                    {
+                                        "name": "prefect-job",
+                                        "imagePullPolicy": "IfNotPresent",
+                                        "env": [
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in get_current_settings()
+                                                .to_environment_variables(
+                                                    exclude_unset=True
+                                                )
+                                                .items()
+                                            ],
+                                            {
+                                                "name": "PREFECT__FLOW_RUN_ID",
+                                                "value": str(flow_run.id),
+                                            },
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in KubernetesWorkerJobConfiguration._base_attribution_environment(
+                                                    flow_run=flow_run,
+                                                    deployment=deployment,
+                                                    flow=flow,
+                                                    worker_name=worker_name,
+                                                ).items()
+                                            ],
+                                            {
+                                                "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                                                "value": "reschedule",
+                                            },
+                                        ],
+                                        "image": get_prefect_image_name(),
+                                        "args": [
+                                            "prefect",
+                                            "flow-run",
+                                            "execute",
+                                        ],
+                                        "resources": {
+                                            "limits": {},
+                                            "requests": {},
+                                        },
+                                    }
+                                ],
                             },
                         },
-                        "spec": {
-                            "parallelism": 1,
-                            "completions": 1,
-                            "restartPolicy": "Never",
-                            "containers": [
-                                {
-                                    "name": "prefect-job",
-                                    "imagePullPolicy": "IfNotPresent",
-                                    "env": [
-                                        *[
-                                            {"name": k, "value": v}
-                                            for k, v in get_current_settings()
-                                            .to_environment_variables(
-                                                exclude_unset=True
-                                            )
-                                            .items()
-                                        ],
-                                        {
-                                            "name": "PREFECT__FLOW_RUN_ID",
-                                            "value": str(flow_run.id),
-                                        },
-                                        {
-                                            "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
-                                            "value": "reschedule",
-                                        },
-                                    ],
-                                    "image": get_prefect_image_name(),
-                                    "args": [
-                                        "prefect",
-                                        "flow-run",
-                                        "execute",
-                                    ],
-                                }
-                            ],
-                        },
                     },
                 },
-            },
-            cluster_config=None,
-            job_watch_timeout_seconds=None,
-            pod_watch_timeout_seconds=60,
-            stream_output=True,
+                cluster_config=None,
+                job_watch_timeout_seconds=None,
+                pod_watch_timeout_seconds=60,
+                stream_output=True,
+            )
         ),
     ),
     (
@@ -589,124 +635,161 @@ from_template_and_values_cases = [
             pod_watch_timeout_seconds=60,
             stream_output=True,
         ),
-        lambda flow_run,
-        deployment,
-        flow,
-        work_pool,
-        worker_name: KubernetesWorkerJobConfiguration(
-            command="prefect flow-run execute",
-            env={
-                **get_current_settings().to_environment_variables(exclude_unset=True),
-                "PREFECT__FLOW_RUN_ID": str(flow_run.id),
-                "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule",
-            },
-            labels={
-                "prefect.io/flow-run-id": str(flow_run.id),
-                "prefect.io/flow-run-name": flow_run.name,
-                "prefect.io/version": _slugify_label_value(
-                    prefect.__version__.split("+")[0]
-                ),
-                "prefect.io/deployment-id": str(deployment.id),
-                "prefect.io/deployment-name": deployment.name,
-                "prefect.io/flow-id": str(flow.id),
-                "prefect.io/flow-name": flow.name,
-                "prefect.io/worker-name": worker_name,
-                "prefect.io/work-pool-name": work_pool.name,
-                "prefect.io/work-pool-id": str(work_pool.id),
-            },
-            name=flow_run.name,
-            namespace="default",
-            job_manifest={
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": {
-                    "namespace": "default",
-                    "generateName": f"{flow_run.name}-",
-                    "labels": {
-                        "prefect.io/flow-run-id": str(flow_run.id),
-                        "prefect.io/flow-run-name": flow_run.name,
-                        "prefect.io/version": _slugify_label_value(
-                            prefect.__version__.split("+")[0]
-                        ),
-                        "prefect.io/deployment-id": str(deployment.id),
-                        "prefect.io/deployment-name": deployment.name,
-                        "prefect.io/flow-id": str(flow.id),
-                        "prefect.io/flow-name": flow.name,
-                        "prefect.io/worker-name": worker_name,
-                        "prefect.io/work-pool-name": work_pool.name,
-                        "prefect.io/work-pool-id": str(work_pool.id),
-                    },
+        lambda flow_run, deployment, flow, work_pool, worker_name: (
+            KubernetesWorkerJobConfiguration(
+                command="prefect flow-run execute",
+                env={
+                    **get_current_settings().to_environment_variables(
+                        exclude_unset=True
+                    ),
+                    "PREFECT__FLOW_RUN_ID": str(flow_run.id),
+                    **KubernetesWorkerJobConfiguration._base_attribution_environment(
+                        flow_run=flow_run,
+                        deployment=deployment,
+                        flow=flow,
+                        worker_name=worker_name,
+                    ),
+                    "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule",
                 },
-                "spec": {
-                    "backoffLimit": 0,
-                    "template": {
-                        "metadata": {
-                            "labels": {
-                                "prefect.io/flow-run-id": str(flow_run.id),
-                                "prefect.io/flow-run-name": flow_run.name,
-                                "prefect.io/version": _slugify_label_value(
-                                    prefect.__version__.split("+")[0]
-                                ),
-                                "prefect.io/deployment-id": str(deployment.id),
-                                "prefect.io/deployment-name": deployment.name,
-                                "prefect.io/flow-id": str(flow.id),
-                                "prefect.io/flow-name": flow.name,
-                                "prefect.io/worker-name": worker_name,
-                                "prefect.io/work-pool-name": work_pool.name,
-                                "prefect.io/work-pool-id": str(work_pool.id),
+                labels={
+                    "prefect.io/flow-run-id": str(flow_run.id),
+                    "prefect.io/flow-run-name": flow_run.name,
+                    "prefect.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "prefect.io/deployment-id": str(deployment.id),
+                    "prefect.io/deployment-name": deployment.name,
+                    "prefect.io/flow-id": str(flow.id),
+                    "prefect.io/flow-name": flow.name,
+                    "prefect.io/worker-name": worker_name,
+                    "prefect.io/work-pool-name": work_pool.name,
+                    "prefect.io/work-pool-id": str(work_pool.id),
+                    "app.kubernetes.io/managed-by": "prefect",
+                    "app.kubernetes.io/part-of": "prefect",
+                    "app.kubernetes.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "app.kubernetes.io/name": _slugify_label_value(deployment.name),
+                },
+                name=flow_run.name,
+                namespace="default",
+                job_manifest={
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "namespace": "default",
+                        "generateName": f"{flow_run.name}-",
+                        "labels": {
+                            "prefect.io/flow-run-id": str(flow_run.id),
+                            "prefect.io/flow-run-name": flow_run.name,
+                            "prefect.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "prefect.io/deployment-id": str(deployment.id),
+                            "prefect.io/deployment-name": deployment.name,
+                            "prefect.io/flow-id": str(flow.id),
+                            "prefect.io/flow-name": flow.name,
+                            "prefect.io/worker-name": worker_name,
+                            "prefect.io/work-pool-name": work_pool.name,
+                            "prefect.io/work-pool-id": str(work_pool.id),
+                            "app.kubernetes.io/managed-by": "prefect",
+                            "app.kubernetes.io/part-of": "prefect",
+                            "app.kubernetes.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "app.kubernetes.io/name": _slugify_label_value(
+                                deployment.name
+                            ),
+                        },
+                    },
+                    "spec": {
+                        "backoffLimit": 0,
+                        "template": {
+                            "metadata": {
+                                "labels": {
+                                    "prefect.io/flow-run-id": str(flow_run.id),
+                                    "prefect.io/flow-run-name": flow_run.name,
+                                    "prefect.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "prefect.io/deployment-id": str(deployment.id),
+                                    "prefect.io/deployment-name": deployment.name,
+                                    "prefect.io/flow-id": str(flow.id),
+                                    "prefect.io/flow-name": flow.name,
+                                    "prefect.io/worker-name": worker_name,
+                                    "prefect.io/work-pool-name": work_pool.name,
+                                    "prefect.io/work-pool-id": str(work_pool.id),
+                                    "app.kubernetes.io/managed-by": "prefect",
+                                    "app.kubernetes.io/part-of": "prefect",
+                                    "app.kubernetes.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "app.kubernetes.io/name": _slugify_label_value(
+                                        deployment.name
+                                    ),
+                                },
+                            },
+                            "spec": {
+                                "parallelism": 1,
+                                "completions": 1,
+                                "restartPolicy": "Never",
+                                "containers": [
+                                    {
+                                        "name": "prefect-job",
+                                        "imagePullPolicy": "IfNotPresent",
+                                        "env": [
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in get_current_settings()
+                                                .to_environment_variables(
+                                                    exclude_unset=True
+                                                )
+                                                .items()
+                                            ],
+                                            {
+                                                "name": "PREFECT__FLOW_RUN_ID",
+                                                "value": str(flow_run.id),
+                                            },
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in KubernetesWorkerJobConfiguration._base_attribution_environment(
+                                                    flow_run=flow_run,
+                                                    deployment=deployment,
+                                                    flow=flow,
+                                                    worker_name=worker_name,
+                                                ).items()
+                                            ],
+                                            {
+                                                "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                                                "value": "reschedule",
+                                            },
+                                            {
+                                                "name": "TEST_ENV",
+                                                "valueFrom": {
+                                                    "secretKeyRef": {
+                                                        "name": "test-secret",
+                                                        "key": "shhhhh",
+                                                    }
+                                                },
+                                            },
+                                        ],
+                                        "image": get_prefect_image_name(),
+                                        "args": [
+                                            "prefect",
+                                            "flow-run",
+                                            "execute",
+                                        ],
+                                    }
+                                ],
                             },
                         },
-                        "spec": {
-                            "parallelism": 1,
-                            "completions": 1,
-                            "restartPolicy": "Never",
-                            "containers": [
-                                {
-                                    "name": "prefect-job",
-                                    "imagePullPolicy": "IfNotPresent",
-                                    "env": [
-                                        *[
-                                            {"name": k, "value": v}
-                                            for k, v in get_current_settings()
-                                            .to_environment_variables(
-                                                exclude_unset=True
-                                            )
-                                            .items()
-                                        ],
-                                        {
-                                            "name": "PREFECT__FLOW_RUN_ID",
-                                            "value": str(flow_run.id),
-                                        },
-                                        {
-                                            "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
-                                            "value": "reschedule",
-                                        },
-                                        {
-                                            "name": "TEST_ENV",
-                                            "valueFrom": {
-                                                "secretKeyRef": {
-                                                    "name": "test-secret",
-                                                    "key": "shhhhh",
-                                                }
-                                            },
-                                        },
-                                    ],
-                                    "image": get_prefect_image_name(),
-                                    "args": [
-                                        "prefect",
-                                        "flow-run",
-                                        "execute",
-                                    ],
-                                }
-                            ],
-                        },
                     },
                 },
-            },
-            cluster_config=None,
-            job_watch_timeout_seconds=None,
-            pod_watch_timeout_seconds=60,
-            stream_output=True,
+                cluster_config=None,
+                job_watch_timeout_seconds=None,
+                pod_watch_timeout_seconds=60,
+                stream_output=True,
+            )
         ),
     ),
     (
@@ -767,6 +850,10 @@ from_template_and_values_cases = [
                                     "image": "test-image:latest",
                                     "imagePullPolicy": "Always",
                                     "args": "echo hello",
+                                    "resources": {
+                                        "limits": {},
+                                        "requests": {},
+                                    },
                                 }
                             ],
                         }
@@ -778,116 +865,162 @@ from_template_and_values_cases = [
             pod_watch_timeout_seconds=90,
             stream_output=False,
         ),
-        lambda flow_run,
-        deployment,
-        flow,
-        work_pool,
-        worker_name: KubernetesWorkerJobConfiguration(
-            command="echo hello",
-            env={
-                **get_current_settings().to_environment_variables(exclude_unset=True),
-                "PREFECT__FLOW_RUN_ID": str(flow_run.id),
-                "TEST_ENV": "test",
-            },
-            labels={
-                "prefect.io/flow-run-id": str(flow_run.id),
-                "prefect.io/flow-run-name": flow_run.name,
-                "prefect.io/version": _slugify_label_value(
-                    prefect.__version__.split("+")[0]
-                ),
-                "prefect.io/deployment-id": str(deployment.id),
-                "prefect.io/deployment-name": deployment.name,
-                "prefect.io/flow-id": str(flow.id),
-                "prefect.io/flow-name": flow.name,
-                "prefect.io/worker-name": worker_name,
-                "prefect.io/work-pool-name": work_pool.name,
-                "prefect.io/work-pool-id": str(work_pool.id),
-                "TEST_LABEL": "test label",
-            },
-            name="test",
-            namespace="test-namespace",
-            job_manifest={
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": {
-                    "namespace": "test-namespace",
-                    "generateName": "test-",
-                    "labels": {
-                        "prefect.io/flow-run-id": str(flow_run.id),
-                        "prefect.io/flow-run-name": flow_run.name,
-                        "prefect.io/version": _slugify_label_value(
-                            prefect.__version__.split("+")[0]
-                        ),
-                        "prefect.io/deployment-id": str(deployment.id),
-                        "prefect.io/deployment-name": deployment.name,
-                        "prefect.io/flow-id": str(flow.id),
-                        "prefect.io/flow-name": flow.name,
-                        "prefect.io/worker-name": worker_name,
-                        "prefect.io/work-pool-name": work_pool.name,
-                        "prefect.io/work-pool-id": str(work_pool.id),
-                        "test_label": "test-label",
-                    },
+        lambda flow_run, deployment, flow, work_pool, worker_name: (
+            KubernetesWorkerJobConfiguration(
+                command="echo hello",
+                env={
+                    **get_current_settings().to_environment_variables(
+                        exclude_unset=True
+                    ),
+                    "PREFECT__FLOW_RUN_ID": str(flow_run.id),
+                    **KubernetesWorkerJobConfiguration._base_attribution_environment(
+                        flow_run=flow_run,
+                        deployment=deployment,
+                        flow=flow,
+                        worker_name=worker_name,
+                    ),
+                    "TEST_ENV": "test",
+                    "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "relinquish",
                 },
-                "spec": {
-                    "backoffLimit": 6,
-                    "ttlSecondsAfterFinished": 60,
-                    "template": {
-                        "metadata": {
-                            "labels": {
-                                "prefect.io/flow-run-id": str(flow_run.id),
-                                "prefect.io/flow-run-name": flow_run.name,
-                                "prefect.io/version": _slugify_label_value(
-                                    prefect.__version__.split("+")[0]
-                                ),
-                                "prefect.io/deployment-id": str(deployment.id),
-                                "prefect.io/deployment-name": deployment.name,
-                                "prefect.io/flow-id": str(flow.id),
-                                "prefect.io/flow-name": flow.name,
-                                "prefect.io/worker-name": worker_name,
-                                "prefect.io/work-pool-name": work_pool.name,
-                                "prefect.io/work-pool-id": str(work_pool.id),
-                                "test_label": "test-label",
+                labels={
+                    "prefect.io/flow-run-id": str(flow_run.id),
+                    "prefect.io/flow-run-name": flow_run.name,
+                    "prefect.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "prefect.io/deployment-id": str(deployment.id),
+                    "prefect.io/deployment-name": deployment.name,
+                    "prefect.io/flow-id": str(flow.id),
+                    "prefect.io/flow-name": flow.name,
+                    "prefect.io/worker-name": worker_name,
+                    "prefect.io/work-pool-name": work_pool.name,
+                    "prefect.io/work-pool-id": str(work_pool.id),
+                    "TEST_LABEL": "test label",
+                    "app.kubernetes.io/managed-by": "prefect",
+                    "app.kubernetes.io/part-of": "prefect",
+                    "app.kubernetes.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "app.kubernetes.io/name": _slugify_label_value(deployment.name),
+                },
+                name="test",
+                namespace="test-namespace",
+                job_manifest={
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "namespace": "test-namespace",
+                        "generateName": "test-",
+                        "labels": {
+                            "prefect.io/flow-run-id": str(flow_run.id),
+                            "prefect.io/flow-run-name": flow_run.name,
+                            "prefect.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "prefect.io/deployment-id": str(deployment.id),
+                            "prefect.io/deployment-name": deployment.name,
+                            "prefect.io/flow-id": str(flow.id),
+                            "prefect.io/flow-name": flow.name,
+                            "prefect.io/worker-name": worker_name,
+                            "prefect.io/work-pool-name": work_pool.name,
+                            "prefect.io/work-pool-id": str(work_pool.id),
+                            "TEST_LABEL": "test-label",
+                            "app.kubernetes.io/managed-by": "prefect",
+                            "app.kubernetes.io/part-of": "prefect",
+                            "app.kubernetes.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "app.kubernetes.io/name": _slugify_label_value(
+                                deployment.name
+                            ),
+                        },
+                    },
+                    "spec": {
+                        "backoffLimit": 6,
+                        "ttlSecondsAfterFinished": 60,
+                        "template": {
+                            "metadata": {
+                                "labels": {
+                                    "prefect.io/flow-run-id": str(flow_run.id),
+                                    "prefect.io/flow-run-name": flow_run.name,
+                                    "prefect.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "prefect.io/deployment-id": str(deployment.id),
+                                    "prefect.io/deployment-name": deployment.name,
+                                    "prefect.io/flow-id": str(flow.id),
+                                    "prefect.io/flow-name": flow.name,
+                                    "prefect.io/worker-name": worker_name,
+                                    "prefect.io/work-pool-name": work_pool.name,
+                                    "prefect.io/work-pool-id": str(work_pool.id),
+                                    "TEST_LABEL": "test-label",
+                                    "app.kubernetes.io/managed-by": "prefect",
+                                    "app.kubernetes.io/part-of": "prefect",
+                                    "app.kubernetes.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "app.kubernetes.io/name": _slugify_label_value(
+                                        deployment.name
+                                    ),
+                                },
+                            },
+                            "spec": {
+                                "parallelism": 1,
+                                "completions": 1,
+                                "restartPolicy": "Never",
+                                "serviceAccountName": "test-service-account",
+                                "containers": [
+                                    {
+                                        "name": "prefect-job",
+                                        "imagePullPolicy": "Always",
+                                        "env": [
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in get_current_settings()
+                                                .to_environment_variables(
+                                                    exclude_unset=True
+                                                )
+                                                .items()
+                                            ],
+                                            {
+                                                "name": "PREFECT__FLOW_RUN_ID",
+                                                "value": str(flow_run.id),
+                                            },
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in KubernetesWorkerJobConfiguration._base_attribution_environment(
+                                                    flow_run=flow_run,
+                                                    deployment=deployment,
+                                                    flow=flow,
+                                                    worker_name=worker_name,
+                                                ).items()
+                                            ],
+                                            {
+                                                "name": "TEST_ENV",
+                                                "value": "test",
+                                            },
+                                            {
+                                                "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                                                "value": "relinquish",
+                                            },
+                                        ],
+                                        "image": "test-image:latest",
+                                        "args": ["echo", "hello"],
+                                        "resources": {
+                                            "limits": {},
+                                            "requests": {},
+                                        },
+                                    }
+                                ],
                             },
                         },
-                        "spec": {
-                            "parallelism": 1,
-                            "completions": 1,
-                            "restartPolicy": "Never",
-                            "serviceAccountName": "test-service-account",
-                            "containers": [
-                                {
-                                    "name": "prefect-job",
-                                    "imagePullPolicy": "Always",
-                                    "env": [
-                                        *[
-                                            {"name": k, "value": v}
-                                            for k, v in get_current_settings()
-                                            .to_environment_variables(
-                                                exclude_unset=True
-                                            )
-                                            .items()
-                                        ],
-                                        {
-                                            "name": "PREFECT__FLOW_RUN_ID",
-                                            "value": str(flow_run.id),
-                                        },
-                                        {
-                                            "name": "TEST_ENV",
-                                            "value": "test",
-                                        },
-                                    ],
-                                    "image": "test-image:latest",
-                                    "args": ["echo", "hello"],
-                                }
-                            ],
-                        },
                     },
                 },
-            },
-            cluster_config=None,
-            job_watch_timeout_seconds=120,
-            pod_watch_timeout_seconds=90,
-            stream_output=False,
+                cluster_config=None,
+                job_watch_timeout_seconds=120,
+                pod_watch_timeout_seconds=90,
+                stream_output=False,
+            )
         ),
     ),
     # custom template with values
@@ -1099,121 +1232,163 @@ from_template_and_values_cases = [
             pod_watch_timeout_seconds=90,
             stream_output=True,
         ),
-        lambda flow_run,
-        deployment,
-        flow,
-        work_pool,
-        worker_name: KubernetesWorkerJobConfiguration(
-            command="echo hello",
-            env={
-                **get_current_settings().to_environment_variables(exclude_unset=True),
-                "PREFECT__FLOW_RUN_ID": str(flow_run.id),
-                "TEST_ENV": "test",
-            },
-            labels={
-                "prefect.io/flow-run-id": str(flow_run.id),
-                "prefect.io/flow-run-name": flow_run.name,
-                "prefect.io/version": prefect.__version__.split("+")[0],
-                "prefect.io/deployment-id": str(deployment.id),
-                "prefect.io/deployment-name": deployment.name,
-                "prefect.io/flow-id": str(flow.id),
-                "prefect.io/flow-name": flow.name,
-                "prefect.io/worker-name": worker_name,
-                "prefect.io/work-pool-name": work_pool.name,
-                "prefect.io/work-pool-id": str(work_pool.id),
-                "TEST_LABEL": "test label",
-            },
-            name="test",
-            namespace="default",
-            job_manifest={
-                "apiVersion": "batch/v1",
-                "kind": "Job",
-                "metadata": {
-                    "namespace": "default",
-                    "generateName": "test-",
-                    "labels": {
-                        "prefect.io/flow-run-id": str(flow_run.id),
-                        "prefect.io/flow-run-name": flow_run.name,
-                        "prefect.io/version": _slugify_label_value(
-                            prefect.__version__.split("+")[0]
-                        ),
-                        "prefect.io/deployment-id": str(deployment.id),
-                        "prefect.io/deployment-name": deployment.name,
-                        "prefect.io/flow-id": str(flow.id),
-                        "prefect.io/flow-name": flow.name,
-                        "prefect.io/worker-name": worker_name,
-                        "prefect.io/work-pool-name": work_pool.name,
-                        "prefect.io/work-pool-id": str(work_pool.id),
-                        "test_label": "test-label",
+        lambda flow_run, deployment, flow, work_pool, worker_name: (
+            KubernetesWorkerJobConfiguration(
+                command="echo hello",
+                env={
+                    **get_current_settings().to_environment_variables(
+                        exclude_unset=True
+                    ),
+                    "PREFECT__FLOW_RUN_ID": str(flow_run.id),
+                    **KubernetesWorkerJobConfiguration._base_attribution_environment(
+                        flow_run=flow_run,
+                        deployment=deployment,
+                        flow=flow,
+                        worker_name=worker_name,
+                    ),
+                    "TEST_ENV": "test",
+                    "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "relinquish",
+                },
+                labels={
+                    "prefect.io/flow-run-id": str(flow_run.id),
+                    "prefect.io/flow-run-name": flow_run.name,
+                    "prefect.io/version": prefect.__version__.split("+")[0],
+                    "prefect.io/deployment-id": str(deployment.id),
+                    "prefect.io/deployment-name": deployment.name,
+                    "prefect.io/flow-id": str(flow.id),
+                    "prefect.io/flow-name": flow.name,
+                    "prefect.io/worker-name": worker_name,
+                    "prefect.io/work-pool-name": work_pool.name,
+                    "prefect.io/work-pool-id": str(work_pool.id),
+                    "TEST_LABEL": "test label",
+                    "app.kubernetes.io/managed-by": "prefect",
+                    "app.kubernetes.io/part-of": "prefect",
+                    "app.kubernetes.io/version": _slugify_label_value(
+                        prefect.__version__.split("+")[0]
+                    ),
+                    "app.kubernetes.io/name": _slugify_label_value(deployment.name),
+                },
+                name="test",
+                namespace="default",
+                job_manifest={
+                    "apiVersion": "batch/v1",
+                    "kind": "Job",
+                    "metadata": {
+                        "namespace": "default",
+                        "generateName": "test-",
+                        "labels": {
+                            "prefect.io/flow-run-id": str(flow_run.id),
+                            "prefect.io/flow-run-name": flow_run.name,
+                            "prefect.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "prefect.io/deployment-id": str(deployment.id),
+                            "prefect.io/deployment-name": deployment.name,
+                            "prefect.io/flow-id": str(flow.id),
+                            "prefect.io/flow-name": flow.name,
+                            "prefect.io/worker-name": worker_name,
+                            "prefect.io/work-pool-name": work_pool.name,
+                            "prefect.io/work-pool-id": str(work_pool.id),
+                            "TEST_LABEL": "test-label",
+                            "app.kubernetes.io/managed-by": "prefect",
+                            "app.kubernetes.io/part-of": "prefect",
+                            "app.kubernetes.io/version": _slugify_label_value(
+                                prefect.__version__.split("+")[0]
+                            ),
+                            "app.kubernetes.io/name": _slugify_label_value(
+                                deployment.name
+                            ),
+                        },
+                    },
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "other_metadata": "other-metadata",
+                                "labels": {
+                                    "prefect.io/flow-run-id": str(flow_run.id),
+                                    "prefect.io/flow-run-name": flow_run.name,
+                                    "prefect.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "prefect.io/deployment-id": str(deployment.id),
+                                    "prefect.io/deployment-name": deployment.name,
+                                    "prefect.io/flow-id": str(flow.id),
+                                    "prefect.io/flow-name": flow.name,
+                                    "prefect.io/worker-name": worker_name,
+                                    "prefect.io/work-pool-name": work_pool.name,
+                                    "prefect.io/work-pool-id": str(work_pool.id),
+                                    "TEST_LABEL": "test-label",
+                                    "label_from_template": "label-from-template",
+                                    "app.kubernetes.io/managed-by": "prefect",
+                                    "app.kubernetes.io/part-of": "prefect",
+                                    "app.kubernetes.io/version": _slugify_label_value(
+                                        prefect.__version__.split("+")[0]
+                                    ),
+                                    "app.kubernetes.io/name": _slugify_label_value(
+                                        deployment.name
+                                    ),
+                                },
+                            },
+                            "spec": {
+                                "parallelism": 1,
+                                "completions": 1,
+                                "restartPolicy": "Never",
+                                "containers": [
+                                    {
+                                        "name": "prefect-job",
+                                        "imagePullPolicy": "Always",
+                                        "env": [
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in get_current_settings()
+                                                .to_environment_variables(
+                                                    exclude_unset=True
+                                                )
+                                                .items()
+                                            ],
+                                            {
+                                                "name": "PREFECT__FLOW_RUN_ID",
+                                                "value": str(flow_run.id),
+                                            },
+                                            *[
+                                                {"name": k, "value": v}
+                                                for k, v in KubernetesWorkerJobConfiguration._base_attribution_environment(
+                                                    flow_run=flow_run,
+                                                    deployment=deployment,
+                                                    flow=flow,
+                                                    worker_name=worker_name,
+                                                ).items()
+                                            ],
+                                            {
+                                                "name": "TEST_ENV",
+                                                "value": "test",
+                                            },
+                                            {
+                                                "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                                                "value": "relinquish",
+                                            },
+                                        ],
+                                        "image": "test-image:latest",
+                                        "args": ["echo", "hello"],
+                                        "resources": {
+                                            "limits": {
+                                                "memory": "200Mi",
+                                            },
+                                            "requests": {
+                                                "memory": "100Mi",
+                                            },
+                                        },
+                                    }
+                                ],
+                            },
+                        }
                     },
                 },
-                "spec": {
-                    "template": {
-                        "metadata": {
-                            "other_metadata": "other-metadata",
-                            "labels": {
-                                "prefect.io/flow-run-id": str(flow_run.id),
-                                "prefect.io/flow-run-name": flow_run.name,
-                                "prefect.io/version": _slugify_label_value(
-                                    prefect.__version__.split("+")[0]
-                                ),
-                                "prefect.io/deployment-id": str(deployment.id),
-                                "prefect.io/deployment-name": deployment.name,
-                                "prefect.io/flow-id": str(flow.id),
-                                "prefect.io/flow-name": flow.name,
-                                "prefect.io/worker-name": worker_name,
-                                "prefect.io/work-pool-name": work_pool.name,
-                                "prefect.io/work-pool-id": str(work_pool.id),
-                                "test_label": "test-label",
-                                "label_from_template": "label-from-template",
-                            },
-                        },
-                        "spec": {
-                            "parallelism": 1,
-                            "completions": 1,
-                            "restartPolicy": "Never",
-                            "containers": [
-                                {
-                                    "name": "prefect-job",
-                                    "imagePullPolicy": "Always",
-                                    "env": [
-                                        *[
-                                            {"name": k, "value": v}
-                                            for k, v in get_current_settings()
-                                            .to_environment_variables(
-                                                exclude_unset=True
-                                            )
-                                            .items()
-                                        ],
-                                        {
-                                            "name": "PREFECT__FLOW_RUN_ID",
-                                            "value": str(flow_run.id),
-                                        },
-                                        {
-                                            "name": "TEST_ENV",
-                                            "value": "test",
-                                        },
-                                    ],
-                                    "image": "test-image:latest",
-                                    "args": ["echo", "hello"],
-                                    "resources": {
-                                        "limits": {
-                                            "memory": "200Mi",
-                                        },
-                                        "requests": {
-                                            "memory": "100Mi",
-                                        },
-                                    },
-                                }
-                            ],
-                        },
-                    }
-                },
-            },
-            cluster_config=None,
-            job_watch_timeout_seconds=120,
-            pod_watch_timeout_seconds=90,
-            stream_output=True,
+                cluster_config=None,
+                job_watch_timeout_seconds=120,
+                pod_watch_timeout_seconds=90,
+                stream_output=True,
+            )
         ),
     ),
 ]
@@ -1396,6 +1571,130 @@ class TestKubernetesWorkerJobConfiguration:
             configuration.job_manifest["metadata"]["labels"]["my-custom-label"]
             == "sweet"
         )
+
+    async def test_user_supplied_base_job_with_annotations(self, flow_run):
+        """The user can supply a custom base job with annotations and they will be
+        included in the final manifest"""
+        template = KubernetesWorker.get_default_base_job_template()
+        template["job_configuration"]["job_manifest"] = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "annotations": {"my-custom-annotation": "some-value"},
+                "labels": {},
+            },
+            "spec": {
+                "template": {
+                    "spec": {
+                        "parallelism": 1,
+                        "completions": 1,
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "prefect-job",
+                                "env": [],
+                            }
+                        ],
+                    }
+                }
+            },
+        }
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            template, {}
+        )
+        assert configuration.job_manifest["metadata"]["annotations"] == {
+            "my-custom-annotation": "some-value",
+        }
+        configuration.prepare_for_flow_run(flow_run)
+        assert (
+            configuration.job_manifest["metadata"]["annotations"][
+                "my-custom-annotation"
+            ]
+            == "some-value"
+        )
+
+    async def test_annotations_from_variables_merged_with_hardcoded_template(
+        self, flow_run
+    ):
+        """Annotations from variables are merged with annotations hardcoded
+        directly in the job manifest template"""
+        template = KubernetesWorker.get_default_base_job_template()
+        # Replace the annotations placeholder with a hardcoded annotation
+        template["job_configuration"]["job_manifest"]["metadata"]["annotations"] = {
+            "hardcoded.io/annotation": "from-template",
+        }
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            template, {"annotations": {"variable.io/annotation": "from-variables"}}
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        annotations = configuration.job_manifest["metadata"]["annotations"]
+        # Both template-hardcoded and variable-provided annotations are present
+        assert annotations["hardcoded.io/annotation"] == "from-template"
+        assert annotations["variable.io/annotation"] == "from-variables"
+
+    async def test_annotations_propagated_to_pod(self, flow_run):
+        """Annotations set via variables are propagated to the pod template metadata"""
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {"annotations": {"app.example.com/team": "platform"}},
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        pod_metadata = configuration.job_manifest["spec"]["template"]["metadata"]
+        assert pod_metadata["annotations"]["app.example.com/team"] == "platform"
+
+    async def test_empty_annotations_not_propagated_to_pod(self, flow_run):
+        """When no annotations are set, pod template metadata should not get
+        an empty annotations dict"""
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {}
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        pod_metadata = configuration.job_manifest["spec"]["template"]["metadata"]
+        assert "annotations" not in pod_metadata
+
+    async def test_annotation_values_not_slugified(self, flow_run):
+        """Unlike labels, annotation values can contain arbitrary strings and
+        should not be slugified"""
+        long_value = "x" * 300
+        special_chars_value = "this has spaces, $pecial chars, and MORE!"
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {
+                "annotations": {
+                    "long-annotation": long_value,
+                    "special-annotation": special_chars_value,
+                }
+            },
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        annotations = configuration.job_manifest["metadata"]["annotations"]
+        assert annotations["long-annotation"] == long_value
+        assert annotations["special-annotation"] == special_chars_value
+
+    async def test_annotation_keys_are_slugified(self, flow_run):
+        """Annotation keys follow the same rules as label keys and should be
+        slugified"""
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {
+                "annotations": {
+                    "valid-dns-prefix/name": "value1",
+                    "key-with-invalid$@*-chars": "value2",
+                }
+            },
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        annotations = configuration.job_manifest["metadata"]["annotations"]
+        assert "valid-dns-prefix/name" in annotations
+        assert "key-with-invalid-chars" in annotations
 
     async def test_user_can_supply_a_sidecar_container_and_volume(self, flow_run):
         """The user can supply a custom base job that includes more complex
@@ -1956,7 +2255,7 @@ class TestKubernetesWorker:
                     "Unable to create Kubernetes job: Forbidden: jobs.batch is forbidden: User "
                     '"system:serviceaccount:helm-test:prefect-worker-dev" cannot '
                     'create resource "jobs" in API group "batch" in the namespace '
-                    '"prefect"'
+                    '"prefect". Hint: Check that your service account has the required RBAC permissions for this operation.'
                 ),
             ):
                 await k8s_worker.run(flow_run, configuration)
@@ -1968,7 +2267,7 @@ class TestKubernetesWorker:
         mock_watch,
         mock_batch_client,
     ):
-        MAX_ATTEMPTS = 3
+        max_retries = 3
         response = MagicMock()
         response.data = json.dumps(
             {
@@ -1999,14 +2298,80 @@ class TestKubernetesWorker:
                     "Unable to create Kubernetes job: Forbidden: jobs.batch is forbidden: User "
                     '"system:serviceaccount:helm-test:prefect-worker-dev" cannot '
                     'create resource "jobs" in API group "batch" in the namespace '
-                    '"prefect"'
+                    '"prefect". Hint: Check that your service account has the required RBAC permissions for this operation.'
                 ),
             ):
                 await k8s_worker.run(flow_run, configuration)
 
         assert (
             mock_batch_client.return_value.create_namespaced_job.call_count
-            == MAX_ATTEMPTS
+            == max_retries
+        )
+
+    async def test_create_job_retries_custom_settings(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_batch_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        custom_max_retries = 5
+        monkeypatch.setenv(
+            "PREFECT_INTEGRATIONS_KUBERNETES_WORKER_CREATE_JOB_RETRY_MAX_RETRIES",
+            str(custom_max_retries),
+        )
+        monkeypatch.setenv(
+            "PREFECT_INTEGRATIONS_KUBERNETES_WORKER_CREATE_JOB_RETRY_DELAY_SECONDS",
+            "0",
+        )
+        monkeypatch.setenv(
+            "PREFECT_INTEGRATIONS_KUBERNETES_WORKER_CREATE_JOB_RETRY_JITTER_MIN_SECONDS",
+            "0",
+        )
+        monkeypatch.setenv(
+            "PREFECT_INTEGRATIONS_KUBERNETES_WORKER_CREATE_JOB_RETRY_JITTER_MAX_SECONDS",
+            "0",
+        )
+
+        response = MagicMock()
+        response.data = json.dumps(
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Failure",
+                "message": 'jobs.batch is forbidden: User "system:serviceaccount:helm-test:prefect-worker-dev" cannot create resource "jobs" in API group "batch" in the namespace "prefect"',
+                "reason": "Forbidden",
+                "details": {"group": "batch", "kind": "jobs"},
+                "code": 403,
+            }
+        )
+        response.status = 403
+        response.reason = "Forbidden"
+
+        mock_batch_client.return_value.create_namespaced_job.side_effect = ApiException(
+            http_resp=response
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            with pytest.raises(
+                InfrastructureError,
+                match=re.escape(
+                    "Unable to create Kubernetes job: Forbidden: jobs.batch is forbidden: User "
+                    '"system:serviceaccount:helm-test:prefect-worker-dev" cannot '
+                    'create resource "jobs" in API group "batch" in the namespace '
+                    '"prefect". Hint: Check that your service account has the required RBAC permissions for this operation.'
+                ),
+            ):
+                await k8s_worker.run(flow_run, configuration)
+
+        assert (
+            mock_batch_client.return_value.create_namespaced_job.call_count
+            == custom_max_retries
         )
 
     async def test_create_job_failure_no_reason(
@@ -2046,7 +2411,7 @@ class TestKubernetesWorker:
                     "Unable to create Kubernetes job: jobs.batch is forbidden: User "
                     '"system:serviceaccount:helm-test:prefect-worker-dev" cannot '
                     'create resource "jobs" in API group "batch" in the namespace '
-                    '"prefect"'
+                    '"prefect". Hint: Check that your service account has the required RBAC permissions for this operation.'
                 ),
             ):
                 await k8s_worker.run(flow_run, configuration)
@@ -2083,7 +2448,10 @@ class TestKubernetesWorker:
         async with KubernetesWorker(work_pool_name="test") as k8s_worker:
             with pytest.raises(
                 InfrastructureError,
-                match=re.escape("Unable to create Kubernetes job: Test"),
+                match=re.escape(
+                    "Unable to create Kubernetes job: Test."
+                    " Hint: Check that your service account has the required RBAC permissions for this operation."
+                ),
             ):
                 await k8s_worker.run(flow_run, configuration)
 
@@ -2109,7 +2477,87 @@ class TestKubernetesWorker:
         async with KubernetesWorker(work_pool_name="test") as k8s_worker:
             with pytest.raises(
                 InfrastructureError,
-                match=re.escape("Unable to create Kubernetes job: Test"),
+                match=re.escape(
+                    "Unable to create Kubernetes job: Test."
+                    " Hint: Check that your service account has the required RBAC permissions for this operation."
+                ),
+            ):
+                await k8s_worker.run(flow_run, configuration)
+
+    async def test_create_job_failure_404_namespace_hint(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_batch_client,
+    ):
+        response = MagicMock()
+        response.data = json.dumps(
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Failure",
+                "message": 'namespaces "nonexistent-ns" not found',
+                "reason": "NotFound",
+                "code": 404,
+            }
+        )
+        response.status = 404
+        response.reason = "Not Found"
+
+        mock_batch_client.return_value.create_namespaced_job.side_effect = ApiException(
+            http_resp=response
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {"image": "foo", "namespace": "nonexistent-ns"},
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            with pytest.raises(
+                InfrastructureError,
+                match=re.escape(
+                    "Hint: Verify that the namespace 'nonexistent-ns' exists in the cluster."
+                ),
+            ):
+                await k8s_worker.run(flow_run, configuration)
+
+    async def test_create_job_failure_quota_exceeded_hint(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_batch_client,
+    ):
+        response = MagicMock()
+        response.data = json.dumps(
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "metadata": {},
+                "status": "Failure",
+                "message": "exceeded quota: resource-quota, requested: cpu=2, limited: cpu=1",
+                "reason": "Forbidden",
+                "code": 403,
+            }
+        )
+        response.status = 403
+        response.reason = "Forbidden"
+
+        mock_batch_client.return_value.create_namespaced_job.side_effect = ApiException(
+            http_resp=response
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            with pytest.raises(
+                InfrastructureError,
+                match=re.escape(
+                    "Hint: Check the resource quotas for the namespace and ensure the job does not exceed them."
+                ),
             ):
                 await k8s_worker.run(flow_run, configuration)
 
@@ -2189,6 +2637,7 @@ class TestKubernetesWorker:
                 for key, value in {
                     **configuration._base_environment(),
                     **configuration._base_flow_run_environment(flow_run),
+                    **configuration._base_attribution_environment(flow_run=flow_run),
                     "foo": "FOO",
                     "bar": "BAR",
                     "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule",
@@ -2225,9 +2674,54 @@ class TestKubernetesWorker:
                 for key, value in {
                     **configuration._base_environment(),
                     **configuration._base_flow_run_environment(flow_run),
+                    **configuration._base_attribution_environment(flow_run=flow_run),
                     "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "die",
                 }.items()
             ]
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR": "reschedule"},
+            [
+                {
+                    "name": "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR",
+                    "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}},
+                }
+            ],
+        ],
+        ids=["value", "valueFrom"],
+    )
+    async def test_overrides_user_behavior_when_backoff_limit_positive(
+        self,
+        env,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+    ):
+        """A user-set behavior must not survive alongside backoffLimit > 0; both retry
+        mechanisms at once would duplicate the flow run."""
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {"backoff_limit": 6, "env": env},
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            await k8s_worker.run(flow_run, configuration)
+            manifest = mock_batch_client.return_value.create_namespaced_job.call_args[
+                0
+            ][1]
+            manifest_env = manifest["spec"]["template"]["spec"]["containers"][0]["env"]
+            behaviors = [
+                v.get("value")
+                for v in manifest_env
+                if v["name"] == "PREFECT_FLOW_RUN_EXECUTE_SIGTERM_BEHAVIOR"
+            ]
+            assert behaviors == ["relinquish"]
 
     async def test_uses_custom_env_list_from_base_template(
         self,
@@ -2533,6 +3027,137 @@ class TestKubernetesWorker:
             ]["metadata"]["labels"]
             assert labels["foo"] == expected
 
+    async def test_uses_annotations_setting(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {
+                "annotations": {
+                    "app.kubernetes.io/managed-by": "prefect",
+                    "team": "platform",
+                }
+            },
+        )
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            await k8s_worker.run(flow_run, configuration)
+            mock_batch_client.return_value.create_namespaced_job.assert_called_once()
+            manifest = mock_batch_client.return_value.create_namespaced_job.call_args[
+                0
+            ][1]
+            annotations = manifest["metadata"]["annotations"]
+            assert annotations["app.kubernetes.io/managed-by"] == "prefect"
+            assert annotations["team"] == "platform"
+
+    async def test_annotations_applied_to_both_job_and_pod(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {"annotations": {"prometheus.io/scrape": "true"}},
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            await k8s_worker.run(flow_run, configuration)
+            mock_batch_client.return_value.create_namespaced_job.assert_called_once()
+            manifest = mock_batch_client.return_value.create_namespaced_job.call_args[
+                0
+            ][1]
+
+            job_annotations = manifest["metadata"]["annotations"]
+            assert job_annotations["prometheus.io/scrape"] == "true"
+
+            pod_annotations = manifest["spec"]["template"]["metadata"]["annotations"]
+            assert pod_annotations["prometheus.io/scrape"] == "true"
+
+    @pytest.mark.parametrize(
+        "given,expected",
+        [
+            ("a-valid-dns-subdomain1/and-a-name", "a-valid-dns-subdomain1/and-a-name"),
+            (
+                "a-prefix-with-invalid$@*^$@-characters/and-a-name",
+                "a-prefix-with-invalid-characters/and-a-name",
+            ),
+            ("a" * 300, "a" * 63),
+            ("a" * 300 + "/" + "b" * 100, "a" * 253 + "/" + "b" * 63),
+        ],
+    )
+    async def test_sanitizes_annotation_keys(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        given,
+        expected,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {"annotations": {given: "foo"}},
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            await k8s_worker.run(flow_run, configuration)
+            mock_batch_client.return_value.create_namespaced_job.assert_called_once()
+            annotations = (
+                mock_batch_client.return_value.create_namespaced_job.call_args[0][1][
+                    "metadata"
+                ]["annotations"]
+            )
+            assert annotations[expected] == "foo"
+
+    async def test_annotation_values_preserved_verbatim(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+    ):
+        """Annotation values can be arbitrary strings, unlike label values"""
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+        long_value = "a" * 500
+        json_value = '{"key": "value", "nested": [1, 2, 3]}'
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(),
+            {
+                "annotations": {
+                    "long-annotation": long_value,
+                    "json-annotation": json_value,
+                }
+            },
+        )
+        configuration.prepare_for_flow_run(flow_run)
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            await k8s_worker.run(flow_run, configuration)
+            mock_batch_client.return_value.create_namespaced_job.assert_called_once()
+            annotations = (
+                mock_batch_client.return_value.create_namespaced_job.call_args[0][1][
+                    "metadata"
+                ]["annotations"]
+            )
+            assert annotations["long-annotation"] == long_value
+            assert annotations["json-annotation"] == json_value
+
     async def test_uses_namespace_setting(
         self,
         flow_run,
@@ -2779,18 +3404,27 @@ class TestKubernetesWorker:
             work_pool: WorkPool,
             monkeypatch: pytest.MonkeyPatch,
         ):
+            from prefect.bundles import _pin_prefect_in_bundle_step_requires
+
             frozen_uuid = uuid.uuid4()
             monkeypatch.setattr(uuid, "uuid4", lambda: frozen_uuid)
             python_version_info = sys.version_info
             async with KubernetesWorker(work_pool_name=work_pool.name) as k8s_worker:
                 future = await k8s_worker.submit(test_flow)
                 assert isinstance(future, PrefectFlowRunFuture)
+            # `_pin_prefect_in_bundle_step_requires` appends `prefect==<version>`
+            # for non-local Prefect builds (CI) and is a no-op for editable
+            # installs (local dev), so use it here to mirror whatever the
+            # bundle code does in the current environment. See PR #21651.
+            requires = ",".join(
+                _pin_prefect_in_bundle_step_requires(["prefect-mock==0.5.5"])
+            )
             expected_upload_command = [
                 "uv",
                 "run",
                 "--quiet",
                 "--with",
-                "prefect-mock==0.5.5",
+                requires,
                 "--python",
                 f"{python_version_info.major}.{python_version_info.minor}",
                 "-m",
@@ -2811,7 +3445,7 @@ class TestKubernetesWorker:
                 "uv",
                 "run",
                 "--with",
-                "prefect-mock==0.5.5",
+                requires,
                 "--python",
                 f"{python_version_info.major}.{python_version_info.minor}",
                 "-m",
@@ -2828,7 +3462,7 @@ class TestKubernetesWorker:
                 assert flow_run.work_pool_name == work_pool.name
                 assert flow_run.work_queue_name == "default"
                 assert flow_run.job_variables == {
-                    "command": " ".join(expected_execute_command)
+                    "command": command_to_string(expected_execute_command)
                 }
 
         async def test_submit_adhoc_run_failed_submission(
@@ -2910,3 +3544,530 @@ class TestObserverSettings:
 
         # stop_observer should NOT have been called
         mock_stop.assert_not_called()
+
+
+class TestKubernetesWorkerKillInfrastructure:
+    """Tests for KubernetesWorker.kill_infrastructure method."""
+
+    @staticmethod
+    @asynccontextmanager
+    async def _mock_kubernetes_client():
+        """Helper to create a mock async context manager for kubernetes client."""
+        yield MagicMock(spec=ApiClient)
+
+    async def test_kill_infrastructure_deletes_job(
+        self,
+        mock_cluster_config: MagicMock,
+    ):
+        """Test that kill_infrastructure successfully deletes a Kubernetes job."""
+        async with KubernetesWorker(work_pool_name="test") as worker:
+            configuration = (
+                await KubernetesWorkerJobConfiguration.from_template_and_values(
+                    base_job_template=KubernetesWorker.get_default_base_job_template(),
+                    values={},
+                )
+            )
+
+            mock_batch_client = MagicMock(spec=BatchV1Api)
+            mock_batch_client.delete_namespaced_job = AsyncMock()
+
+            with mock.patch.object(
+                worker,
+                "_get_configured_kubernetes_client",
+                return_value=self._mock_kubernetes_client(),
+            ):
+                with mock.patch(
+                    "prefect_kubernetes.worker.BatchV1Api",
+                    return_value=mock_batch_client,
+                ):
+                    await worker.kill_infrastructure(
+                        infrastructure_pid="test-namespace:test-job",
+                        configuration=configuration,
+                        grace_seconds=30,
+                    )
+
+                    mock_batch_client.delete_namespaced_job.assert_called_once_with(
+                        name="test-job",
+                        namespace="test-namespace",
+                        grace_period_seconds=30,
+                        propagation_policy="Foreground",
+                    )
+
+    async def test_kill_infrastructure_raises_not_found(
+        self,
+        mock_cluster_config: MagicMock,
+    ):
+        """Test that kill_infrastructure raises InfrastructureNotFound for 404 errors."""
+        from prefect.exceptions import InfrastructureNotFound
+
+        async with KubernetesWorker(work_pool_name="test") as worker:
+            configuration = (
+                await KubernetesWorkerJobConfiguration.from_template_and_values(
+                    base_job_template=KubernetesWorker.get_default_base_job_template(),
+                    values={},
+                )
+            )
+
+            mock_batch_client = AsyncMock(spec=BatchV1Api)
+            mock_batch_client.delete_namespaced_job.side_effect = ApiException(
+                status=404
+            )
+
+            with mock.patch.object(
+                worker,
+                "_get_configured_kubernetes_client",
+                return_value=self._mock_kubernetes_client(),
+            ):
+                with mock.patch(
+                    "prefect_kubernetes.worker.BatchV1Api",
+                    return_value=mock_batch_client,
+                ):
+                    with pytest.raises(
+                        InfrastructureNotFound, match="not found in namespace"
+                    ):
+                        await worker.kill_infrastructure(
+                            infrastructure_pid="test-namespace:test-job",
+                            configuration=configuration,
+                            grace_seconds=30,
+                        )
+
+    async def test_kill_infrastructure_invalid_pid_format(
+        self,
+        mock_cluster_config: MagicMock,
+    ):
+        """Test that kill_infrastructure raises ValueError for invalid pid format."""
+        async with KubernetesWorker(work_pool_name="test") as worker:
+            configuration = (
+                await KubernetesWorkerJobConfiguration.from_template_and_values(
+                    base_job_template=KubernetesWorker.get_default_base_job_template(),
+                    values={},
+                )
+            )
+
+            with pytest.raises(ValueError, match="Invalid infrastructure_pid format"):
+                await worker.kill_infrastructure(
+                    infrastructure_pid="invalid-format-no-colon",
+                    configuration=configuration,
+                    grace_seconds=30,
+                )
+
+
+@pytest.fixture
+def enable_store_env_as_secret(monkeypatch):
+    monkeypatch.setenv(
+        "PREFECT_INTEGRATIONS_KUBERNETES_WORKER_STORE_ENV_AS_SECRET", "true"
+    )
+
+
+class TestStoreEnvAsSecret:
+    @pytest.fixture
+    def flow_run(self):
+        return FlowRun(flow_id=uuid.uuid4(), name="my-flow-run-name")
+
+    async def test_disabled_by_default(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            # No secret should be created for env vars
+            mock_core_client.return_value.create_namespaced_secret.assert_not_called()
+
+    async def test_creates_secret_with_plain_values(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            # A secret should have been created
+            mock_core_client.return_value.create_namespaced_secret.assert_called_once()
+            call_kwargs = (
+                mock_core_client.return_value.create_namespaced_secret.call_args
+            )
+            secret_body = call_kwargs.kwargs["body"]
+            # Verify string_data contains the env vars that were plain-value
+            assert secret_body.string_data is not None
+            assert len(secret_body.string_data) > 0
+
+    async def test_preserves_value_from_entries(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        # Use a template with a valueFrom entry
+        base_template = KubernetesWorker.get_default_base_job_template()
+        base_template["job_configuration"]["job_manifest"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["env"] = [
+            {
+                "name": "MY_SECRET",
+                "valueFrom": {"secretKeyRef": {"name": "my-secret", "key": "val"}},
+            },
+        ]
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            base_template, {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            # Verify the job manifest still has the valueFrom entry in env
+            call_args = mock_batch_client.return_value.create_namespaced_job.call_args[
+                0
+            ]
+            job_manifest = call_args[1]
+            container = job_manifest["spec"]["template"]["spec"]["containers"][0]
+            env = container.get("env", [])
+            value_from_entries = [e for e in env if "valueFrom" in e]
+            assert any(e["name"] == "MY_SECRET" for e in value_from_entries)
+
+    async def test_uses_env_from_secret_ref(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            # Verify envFrom is set on the container
+            call_args = mock_batch_client.return_value.create_namespaced_job.call_args[
+                0
+            ]
+            job_manifest = call_args[1]
+            container = job_manifest["spec"]["template"]["spec"]["containers"][0]
+            env_from = container.get("envFrom", [])
+            assert any(
+                entry.get("secretRef", {}).get("name") == "test-env-secret"
+                for entry in env_from
+            )
+
+    async def test_sets_owner_reference(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+        mock_job,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            # Verify patch_namespaced_secret was called with owner reference
+            mock_core_client.return_value.patch_namespaced_secret.assert_called_once()
+            patch_call = mock_core_client.return_value.patch_namespaced_secret.call_args
+            assert patch_call.kwargs["name"] == "test-env-secret"
+            body = patch_call.kwargs["body"]
+            owner_refs = body["metadata"]["ownerReferences"]
+            assert len(owner_refs) == 1
+            assert owner_refs[0]["kind"] == "Job"
+            assert owner_refs[0]["apiVersion"] == "batch/v1"
+            assert owner_refs[0]["name"] == mock_job.metadata.name
+            assert owner_refs[0]["uid"] == mock_job.metadata.uid
+
+    async def test_compatible_with_api_key_secret(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+        enable_store_api_key_in_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_core_client.return_value.read_namespaced_secret.side_effect = ApiException(
+            status=404
+        )
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        with temporary_settings(updates={PREFECT_API_KEY: "fake"}):
+            async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+                configuration.prepare_for_flow_run(flow_run=flow_run)
+                await k8s_worker.run(flow_run, configuration)
+
+                # Verify the job was created
+                mock_batch_client.return_value.create_namespaced_job.assert_called_once()
+                call_args = (
+                    mock_batch_client.return_value.create_namespaced_job.call_args[0]
+                )
+                job_manifest = call_args[1]
+                container = job_manifest["spec"]["template"]["spec"]["containers"][0]
+
+                # PREFECT_API_KEY should be a valueFrom (handled by api_key secret logic)
+                env = container.get("env", [])
+                api_key_entries = [e for e in env if e.get("name") == "PREFECT_API_KEY"]
+                assert all("valueFrom" in e for e in api_key_entries)
+
+                # envFrom should reference the env secret
+                env_from = container.get("envFrom", [])
+                assert any(
+                    entry.get("secretRef", {}).get("name") == "test-env-secret"
+                    for entry in env_from
+                )
+
+    async def test_no_secret_created_when_no_plain_values(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        # Create a configuration where all env vars are valueFrom
+        base_template = KubernetesWorker.get_default_base_job_template()
+        base_template["job_configuration"]["job_manifest"]["spec"]["template"]["spec"][
+            "containers"
+        ][0]["env"] = [
+            {
+                "name": "MY_SECRET",
+                "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}},
+            },
+        ]
+        # Clear all variables so nothing generates plain env entries
+        base_template["variables"]["properties"] = {}
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            base_template, {"image": "foo"}
+        )
+        # Manually set the env to only valueFrom entries
+        configuration.job_manifest["spec"]["template"]["spec"]["containers"][0][
+            "env"
+        ] = [
+            {
+                "name": "MY_SECRET",
+                "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}},
+            },
+        ]
+
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            # Override env again after prepare_for_flow_run since it adds env vars
+            configuration.job_manifest["spec"]["template"]["spec"]["containers"][0][
+                "env"
+            ] = [
+                {
+                    "name": "MY_SECRET",
+                    "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}},
+                },
+            ]
+            await k8s_worker.run(flow_run, configuration)
+
+            # No secret should be created since there are no plain-value entries
+            mock_core_client.return_value.create_namespaced_secret.assert_not_called()
+
+    async def test_secret_name_derived_from_generate_name(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            call_kwargs = (
+                mock_core_client.return_value.create_namespaced_secret.call_args
+            )
+            secret_body = call_kwargs.kwargs["body"]
+            # The name should start with the generateName prefix and contain "env-"
+            generate_name = (
+                configuration.job_manifest["metadata"]
+                .get("generateName", "")
+                .rstrip("-")
+            )
+            assert secret_body.metadata.name.startswith(f"{generate_name}-env-")
+
+    async def test_secret_labeled_with_flow_run_id(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            await k8s_worker.run(flow_run, configuration)
+
+            call_kwargs = (
+                mock_core_client.return_value.create_namespaced_secret.call_args
+            )
+            secret_body = call_kwargs.kwargs["body"]
+            assert secret_body.metadata.labels.get("prefect.io/flow-run-id") == str(
+                flow_run.id
+            )
+
+    async def test_cleans_up_secret_on_job_creation_failure(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+        mock_batch_client.return_value.create_namespaced_job.side_effect = ApiException(
+            status=403, reason="Forbidden"
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            with pytest.raises(InfrastructureError):
+                await k8s_worker.run(flow_run, configuration)
+
+            # The orphaned Secret should be cleaned up
+            mock_core_client.return_value.delete_namespaced_secret.assert_called_once_with(
+                name="test-env-secret",
+                namespace=configuration.namespace,
+            )
+
+    async def test_owner_ref_failure_does_not_fail_job(
+        self,
+        flow_run,
+        mock_core_client,
+        mock_watch,
+        mock_pods_stream_that_returns_running_pod,
+        mock_batch_client,
+        enable_store_env_as_secret,
+    ):
+        mock_watch.return_value.stream = mock_pods_stream_that_returns_running_pod
+
+        mock_secret = MagicMock()
+        mock_secret.metadata.name = "test-env-secret"
+        mock_core_client.return_value.create_namespaced_secret.return_value = (
+            mock_secret
+        )
+        mock_core_client.return_value.patch_namespaced_secret.side_effect = (
+            ApiException(status=403, reason="Forbidden")
+        )
+
+        configuration = await KubernetesWorkerJobConfiguration.from_template_and_values(
+            KubernetesWorker.get_default_base_job_template(), {"image": "foo"}
+        )
+        async with KubernetesWorker(work_pool_name="test") as k8s_worker:
+            configuration.prepare_for_flow_run(flow_run=flow_run)
+            # Should not raise — the Job was created successfully
+            await k8s_worker.run(flow_run, configuration)
+
+            # Job should still have been created
+            mock_batch_client.return_value.create_namespaced_job.assert_called_once()

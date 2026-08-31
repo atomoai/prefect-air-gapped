@@ -1,6 +1,7 @@
 ---
 title: Settings and profiles
 description: Prefect settings let you customize behavior across different environments.
+keywords: ["settings", "profile", "configuration", "environment variable", "PREFECT_API_URL"]
 ---
 
 ## Why use settings?
@@ -82,7 +83,7 @@ You can also export an environment variable in your shell to apply it to all flo
 
 ```bash
 export PREFECT_LOGGING_LEVEL="DEBUG"
-prefect run my_flow.py
+python my_flow.py
 ```
 
 You can see supported environment variables for each setting in the [settings reference documentation](/v3/develop/settings-ref).
@@ -149,10 +150,10 @@ Profiles are stored in a [TOML](https://toml.io/en/) file located at `~/.prefect
 
 One and only one profile can be active at any time.
 
-Immediately after installation, the `ephemeral` profile will be used, which only has `PREFECT_SERVER_ALLOW_EPHEMERAL_MODE` configured:
+Immediately after installation, the `ephemeral` profile will be used, which only has `PREFECT_SERVER_EPHEMERAL_ENABLED` configured:
 
 <Tip>
-**What is `PREFECT_SERVER_ALLOW_EPHEMERAL_MODE`?**
+**What is `PREFECT_SERVER_EPHEMERAL_ENABLED`?**
 
 This setting allows a Prefect server to be run ephemerally as needed without explicitly starting a server process.
 </Tip>

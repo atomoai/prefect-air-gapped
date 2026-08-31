@@ -80,6 +80,11 @@ from prefect.client.orchestration._blocks_types.client import (
     BlocksTypeAsyncClient,
 )
 
+from prefect.client.orchestration._events.client import (
+    EventClient,
+    EventAsyncClient,
+)
+
 import prefect
 import prefect.exceptions
 from prefect.logging.loggers import get_run_logger
@@ -105,6 +110,8 @@ from prefect.client.schemas.objects import (
     FlowRunResult,
     Parameter,
     Constant,
+    ServerDefaultResultStorage,
+    ServerDefaultResultStorageUpdate,
     TaskRunPolicy,
     WorkQueue,
     WorkQueueStatusDetail,
@@ -116,7 +123,7 @@ from prefect.client.schemas.sorting import (
 from prefect.logging import get_logger
 from prefect.settings import (
     PREFECT_API_AUTH_STRING,
-    PREFECT_API_DATABASE_CONNECTION_URL,
+    PREFECT_SERVER_DATABASE_CONNECTION_URL,
     PREFECT_API_ENABLE_HTTP2,
     PREFECT_API_KEY,
     PREFECT_API_REQUEST_TIMEOUT,
@@ -125,12 +132,21 @@ from prefect.settings import (
     PREFECT_API_URL,
     PREFECT_CLIENT_CSRF_SUPPORT_ENABLED,
     PREFECT_CLOUD_API_URL,
-    PREFECT_SERVER_ALLOW_EPHEMERAL_MODE,
+    PREFECT_SERVER_EPHEMERAL_ENABLED,
     PREFECT_TESTING_UNIT_TEST_MODE,
 )
 from prefect.types._datetime import now
 
+from prefect._internal.urls import strip_auth_from_url
+from prefect._internal.version_checking import (
+    _api_version_check_key,
+    _cache_api_version_check,
+    _clear_api_version_check_cache,
+    _is_api_version_check_cached,
+)
+
 if TYPE_CHECKING:
+    from prefect.client.schemas.responses import WorkQueueConcurrencyStatus
     from prefect.tasks import Task as TaskObject
 
 from prefect.client.base import (
@@ -229,7 +245,7 @@ def get_client(
     api: str = PREFECT_API_URL.value()
     server_type = None
 
-    if not api and PREFECT_SERVER_ALLOW_EPHEMERAL_MODE:
+    if not api and PREFECT_SERVER_EPHEMERAL_ENABLED:
         # create an ephemeral API if none was provided
         from prefect.server.api.server import SubprocessASGIServer
 
@@ -239,7 +255,7 @@ def get_client(
 
         api = server.api_url
         server_type = ServerType.EPHEMERAL
-    elif not api and not PREFECT_SERVER_ALLOW_EPHEMERAL_MODE:
+    elif not api and not PREFECT_SERVER_EPHEMERAL_ENABLED:
         raise ValueError(
             "No Prefect API URL provided. Please set PREFECT_API_URL to the address of a running Prefect server."
         )
@@ -277,6 +293,7 @@ class PrefectClient(
     BlocksSchemaAsyncClient,
     BlocksTypeAsyncClient,
     WorkPoolAsyncClient,
+    EventAsyncClient,
 ):
     """
     An asynchronous client for interacting with the [Prefect REST API](https://docs.prefect.io/v3/api-ref/rest-api/).
@@ -700,6 +717,44 @@ class PrefectClient(
                 raise
         return WorkQueueStatusDetail.model_validate(response.json())
 
+    async def read_work_queue_concurrency_status(
+        self,
+        id: UUID,
+        page: int = 1,
+        limit: Optional[int] = None,
+    ) -> "WorkQueueConcurrencyStatus":
+        """
+        Read concurrency status for a work queue.
+
+        Args:
+            id: the id of the work queue
+            page: Page number (1-indexed).
+            limit: Max flow runs per page (server default if None).
+
+        Raises:
+            prefect.exceptions.ObjectNotFound: If request returns 404
+            httpx.RequestError: If request fails
+
+        Returns:
+            Paginated WorkQueueConcurrencyStatus with flow run summaries
+        """
+        from prefect.client.schemas.responses import WorkQueueConcurrencyStatus
+
+        body: dict = {"page": page}
+        if limit is not None:
+            body["limit"] = limit
+
+        try:
+            response = await self._client.post(
+                f"/work_queues/{id}/concurrency_status", json=body
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == status.HTTP_404_NOT_FOUND:
+                raise prefect.exceptions.ObjectNotFound(http_exc=e) from e
+            else:
+                raise
+        return WorkQueueConcurrencyStatus.model_validate(response.json())
+
     async def match_work_queues(
         self,
         prefixes: list[str],
@@ -829,9 +884,12 @@ class PrefectClient(
             state=prefect.states.to_state_create(state),
             task_inputs=task_inputs or {},
         )
-        content = task_run_data.model_dump_json(exclude={"id"} if id is None else None)
-
-        response = await self._client.post("/task_runs/", content=content)
+        response = await self._client.post(
+            "/task_runs/",
+            json=task_run_data.model_dump(
+                mode="json", exclude={"id"} if id is None else None
+            ),
+        )
         return TaskRun.model_validate(response.json())
 
     async def read_task_run(self, task_run_id: UUID) -> TaskRun:
@@ -874,8 +932,9 @@ class PrefectClient(
             task_run_filter: filter criteria for task runs
             deployment_filter: filter criteria for deployments
             sort: sort criteria for the task runs
-            limit: a limit for the task run query
-            offset: an offset for the task run query
+            limit: maximum number of task runs to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the task run query.
 
         Returns:
             a list of Task Run model representations
@@ -980,8 +1039,9 @@ class PrefectClient(
         Args:
             work_pool_name: Name of the work pool for which to get queues.
             work_queue_filter: Criteria by which to filter queues.
-            limit: Limit for the queue query.
-            offset: Limit for the queue query.
+            limit: maximum number of work queues to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the work queue query.
 
         Returns:
             List of queues for the specified work pool.
@@ -1022,12 +1082,46 @@ class PrefectClient(
         res = await self._client.get("/admin/version")
         return res.json()
 
+    async def read_server_default_result_storage(
+        self,
+    ) -> ServerDefaultResultStorage:
+        response = await self._client.get("/admin/storage")
+        return ServerDefaultResultStorage.model_validate(response.json())
+
+    async def update_server_default_result_storage(
+        self,
+        default_result_storage_block_id: UUID,
+    ) -> ServerDefaultResultStorage:
+        response = await self._client.put(
+            "/admin/storage",
+            json=ServerDefaultResultStorageUpdate(
+                default_result_storage_block_id=default_result_storage_block_id
+            ).model_dump(mode="json"),
+        )
+        return ServerDefaultResultStorage.model_validate(response.json())
+
+    async def clear_server_default_result_storage(self) -> None:
+        await self._client.delete("/admin/storage")
+
     def client_version(self) -> str:
         return prefect.__version__
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop | None:
         return self._loop
+
+    async def raise_for_api_version_mismatch_once(self) -> None:
+        """Run API version compatibility check once per process/API/client version."""
+        # Cloud is always compatible as a server
+        if self.server_type == ServerType.CLOUD:
+            return
+
+        key = _api_version_check_key(str(self.api_url), self.client_version())
+        if _is_api_version_check_cached(key):
+            return
+
+        await self.raise_for_api_version_mismatch()
+        _cache_api_version_check(key)
 
     async def raise_for_api_version_mismatch(self) -> None:
         # Cloud is always compatible as a server
@@ -1039,7 +1133,9 @@ class PrefectClient(
         except Exception as e:
             if "Unauthorized" in str(e):
                 raise e
-            raise RuntimeError(f"Failed to reach API at {self.api_url}") from e
+            raise RuntimeError(
+                f"Failed to reach API at {strip_auth_from_url(str(self.api_url))}"
+            ) from e
 
         api_version = version.parse(api_version)
         client_version = version.parse(self.client_version())
@@ -1094,10 +1190,12 @@ class PrefectClient(
         if self._ephemeral_app:
             self.logger.debug(
                 "Using ephemeral application with database at "
-                f"{PREFECT_API_DATABASE_CONNECTION_URL.value()}"
+                f"{PREFECT_SERVER_DATABASE_CONNECTION_URL.value()}"
             )
         else:
-            self.logger.debug(f"Connecting to API at {self.api_url}")
+            self.logger.debug(
+                f"Connecting to API at {strip_auth_from_url(str(self.api_url))}"
+            )
 
         # Enter the httpx client's context
         await self._exit_stack.enter_async_context(self._client)
@@ -1142,6 +1240,7 @@ class SyncPrefectClient(
     BlocksSchemaClient,
     BlocksTypeClient,
     WorkPoolClient,
+    EventClient,
 ):
     """
     A synchronous client for interacting with the [Prefect REST API](https://docs.prefect.io/v3/api-ref/rest-api/).
@@ -1380,8 +1479,40 @@ class SyncPrefectClient(
         res = self._client.get("/admin/version")
         return res.json()
 
+    def read_server_default_result_storage(self) -> ServerDefaultResultStorage:
+        response = self._client.get("/admin/storage")
+        return ServerDefaultResultStorage.model_validate(response.json())
+
+    def update_server_default_result_storage(
+        self,
+        default_result_storage_block_id: UUID,
+    ) -> ServerDefaultResultStorage:
+        response = self._client.put(
+            "/admin/storage",
+            json=ServerDefaultResultStorageUpdate(
+                default_result_storage_block_id=default_result_storage_block_id
+            ).model_dump(mode="json"),
+        )
+        return ServerDefaultResultStorage.model_validate(response.json())
+
+    def clear_server_default_result_storage(self) -> None:
+        self._client.delete("/admin/storage")
+
     def client_version(self) -> str:
         return prefect.__version__
+
+    def raise_for_api_version_mismatch_once(self) -> None:
+        """Run API version compatibility check once per process/API/client version."""
+        # Cloud is always compatible as a server
+        if self.server_type == ServerType.CLOUD:
+            return
+
+        key = _api_version_check_key(str(self.api_url), self.client_version())
+        if _is_api_version_check_cached(key):
+            return
+
+        self.raise_for_api_version_mismatch()
+        _cache_api_version_check(key)
 
     def raise_for_api_version_mismatch(self) -> None:
         # Cloud is always compatible as a server
@@ -1393,7 +1524,9 @@ class SyncPrefectClient(
         except Exception as e:
             if "Unauthorized" in str(e):
                 raise e
-            raise RuntimeError(f"Failed to reach API at {self.api_url}") from e
+            raise RuntimeError(
+                f"Failed to reach API at {strip_auth_from_url(str(self.api_url))}"
+            ) from e
 
         api_version = version.parse(api_version)
         client_version = version.parse(self.client_version())
@@ -1478,7 +1611,7 @@ class SyncPrefectClient(
             name=name,
             flow_run_id=flow_run_id,
             task_key=task.task_key,
-            dynamic_key=dynamic_key,
+            dynamic_key=str(dynamic_key),
             tags=list(tags),
             task_version=task.version,
             empirical_policy=TaskRunPolicy(
@@ -1490,9 +1623,12 @@ class SyncPrefectClient(
             task_inputs=task_inputs or {},
         )
 
-        content = task_run_data.model_dump_json(exclude={"id"} if id is None else None)
-
-        response = self._client.post("/task_runs/", content=content)
+        response = self._client.post(
+            "/task_runs/",
+            json=task_run_data.model_dump(
+                mode="json", exclude={"id"} if id is None else None
+            ),
+        )
         return TaskRun.model_validate(response.json())
 
     def read_task_run(self, task_run_id: UUID) -> TaskRun:
@@ -1535,8 +1671,9 @@ class SyncPrefectClient(
             task_run_filter: filter criteria for task runs
             deployment_filter: filter criteria for deployments
             sort: sort criteria for the task runs
-            limit: a limit for the task run query
-            offset: an offset for the task run query
+            limit: maximum number of task runs to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the task run query.
 
         Returns:
             a list of Task Run model representations
@@ -1833,6 +1970,44 @@ class SyncPrefectClient(
                 raise
         return WorkQueueStatusDetail.model_validate(response.json())
 
+    def read_work_queue_concurrency_status(
+        self,
+        id: UUID,
+        page: int = 1,
+        limit: Optional[int] = None,
+    ) -> "WorkQueueConcurrencyStatus":
+        """
+        Read concurrency status for a work queue.
+
+        Args:
+            id: the id of the work queue
+            page: Page number (1-indexed).
+            limit: Max flow runs per page (server default if None).
+
+        Raises:
+            prefect.exceptions.ObjectNotFound: If request returns 404
+            httpx.RequestError: If request fails
+
+        Returns:
+            Paginated WorkQueueConcurrencyStatus with flow run summaries
+        """
+        from prefect.client.schemas.responses import WorkQueueConcurrencyStatus
+
+        body: dict = {"page": page}
+        if limit is not None:
+            body["limit"] = limit
+
+        try:
+            response = self._client.post(
+                f"/work_queues/{id}/concurrency_status", json=body
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == status.HTTP_404_NOT_FOUND:
+                raise prefect.exceptions.ObjectNotFound(http_exc=e) from e
+            else:
+                raise
+        return WorkQueueConcurrencyStatus.model_validate(response.json())
+
     def match_work_queues(
         self,
         prefixes: list[str],
@@ -1906,8 +2081,9 @@ class SyncPrefectClient(
         Args:
             work_pool_name: Name of the work pool for which to get queues.
             work_queue_filter: Criteria by which to filter queues.
-            limit: Limit for the queue query.
-            offset: Limit for the queue query.
+            limit: maximum number of work queues to return. When `None`, the server
+                applies `PREFECT_SERVER_API_DEFAULT_LIMIT` (200 by default).
+            offset: an offset for the work queue query.
 
         Returns:
             List of queues for the specified work pool.

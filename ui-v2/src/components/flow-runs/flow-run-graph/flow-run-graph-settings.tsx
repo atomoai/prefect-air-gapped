@@ -1,3 +1,7 @@
+import { useCallback, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
 	DEFAULT_HORIZONTAL_SCALE_MULTIPLIER,
 	type HorizontalMode,
@@ -8,16 +12,10 @@ import {
 	setDisabledArtifacts,
 	setDisabledEdges,
 	setDisabledEvents,
-	setHorizontalMode,
 	setHorizontalScaleMultiplier,
-	setVerticalMode,
+	setLayoutMode,
 	type VerticalMode,
-} from "@prefecthq/graphs";
-import { useCallback, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Typography } from "@/components/ui/typography";
+} from "@/graphs";
 
 type LayoutOption = `${HorizontalMode}_${VerticalMode}`;
 
@@ -85,8 +83,7 @@ export function FlowRunGraphSettings() {
 		}
 
 		setSelectedLayoutOption(value);
-		setHorizontalMode(horizontal);
-		setVerticalMode(vertical);
+		setLayoutMode(horizontal, vertical);
 	}, []);
 
 	const handleHideEdgesChange = useCallback((value: boolean) => {
@@ -107,7 +104,7 @@ export function FlowRunGraphSettings() {
 	return (
 		<div className="flex flex-col gap-2">
 			<div className="flex flex-col gap-2">
-				<Typography variant="bodyLarge">Layout</Typography>
+				<p className="text-lg">Layout</p>
 				<div className="flex flex-col gap-2">
 					{layoutOptions.map((option) => (
 						<div key={option.value} className="flex items-center gap-2">
@@ -127,7 +124,7 @@ export function FlowRunGraphSettings() {
 
 			{(layout.isTemporal() || layout.isLeftAligned()) && (
 				<div className="flex flex-col gap-2">
-					<Typography variant="bodyLarge">Scaling</Typography>
+					<p className="text-lg">Scaling</p>
 					<div className="flex items-center gap-2">
 						<Button
 							variant="outline"

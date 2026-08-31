@@ -1,3 +1,5 @@
+import { useNavigate } from "@tanstack/react-router";
+import { useCallback } from "react";
 import type { Deployment } from "@/api/deployments";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { TagBadgeGroup } from "@/components/ui/tag-badge-group";
@@ -20,6 +22,15 @@ const FieldValue = ({
 	children: React.ReactNode;
 }) => <dd className={cn("text-sm", className)}>{children}</dd>;
 export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
+	const navigate = useNavigate();
+
+	const handleTagClick = useCallback(
+		(tag: string) => {
+			void navigate({ to: "/deployments", search: { tags: [tag] } });
+		},
+		[navigate],
+	);
+
 	const TOP_FIELDS = [
 		{
 			field: "Status",
@@ -68,9 +79,14 @@ export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
 			field: "Concurrency Limit",
 			ComponentValue: () =>
 				deployment.global_concurrency_limit ? (
-					<FieldValue>{deployment.global_concurrency_limit.limit}</FieldValue>
+					<FieldValue>
+						{deployment.global_concurrency_limit.limit !== null &&
+						deployment.global_concurrency_limit.limit !== undefined
+							? deployment.global_concurrency_limit.limit
+							: "∞"}
+					</FieldValue>
 				) : (
-					<None />
+					<FieldValue>∞</FieldValue>
 				),
 		},
 	] as const;
@@ -78,11 +94,15 @@ export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
 	const BOTTOM_FIELDS = [
 		{
 			field: "Flow ID",
-			ComponentValue: () => <FieldValue>{deployment.flow_id}</FieldValue>,
+			ComponentValue: () => (
+				<FieldValue className="font-mono">{deployment.flow_id}</FieldValue>
+			),
 		},
 		{
 			field: "Deployment ID",
-			ComponentValue: () => <FieldValue>{deployment.id}</FieldValue>,
+			ComponentValue: () => (
+				<FieldValue className="font-mono">{deployment.id}</FieldValue>
+			),
 		},
 		{
 			field: "Deployment Version",
@@ -97,7 +117,9 @@ export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
 			field: "Storage Document ID",
 			ComponentValue: () =>
 				deployment.storage_document_id ? (
-					<FieldValue>{deployment.storage_document_id}</FieldValue>
+					<FieldValue className="font-mono">
+						{deployment.storage_document_id}
+					</FieldValue>
 				) : (
 					<None />
 				),
@@ -106,7 +128,9 @@ export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
 			field: "Infrastructure Document ID",
 			ComponentValue: () =>
 				deployment.infrastructure_document_id ? (
-					<FieldValue>{deployment.infrastructure_document_id}</FieldValue>
+					<FieldValue className="font-mono">
+						{deployment.infrastructure_document_id}
+					</FieldValue>
 				) : (
 					<None />
 				),
@@ -116,7 +140,11 @@ export const DeploymentMetadata = ({ deployment }: DeploymentMetadataProps) => {
 			ComponentValue: () =>
 				deployment.tags && deployment.tags.length > 0 ? (
 					<dd>
-						<TagBadgeGroup tags={deployment.tags} maxTagsDisplayed={4} />
+						<TagBadgeGroup
+							tags={deployment.tags}
+							maxTagsDisplayed={4}
+							onTagClick={handleTagClick}
+						/>
 					</dd>
 				) : (
 					<None />

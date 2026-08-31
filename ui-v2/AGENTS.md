@@ -8,7 +8,9 @@ This is the new React-based Prefect UI, migrating from the legacy Vue applicatio
 prefect/ui-v2/
 ├── src/
 │   ├── api/           # API queries, mutations, and mocks
+│   ├── auth/          # Authentication state, AuthProvider, useAuth hook
 │   ├── components/    # React components organized by domain
+│   ├── graphs/        # Pixi.js run graph rendering engine (ported from @prefecthq/graphs)
 │   ├── hooks/         # Custom hooks for common patterns
 │   ├── lib/           # Utility functions and shared code
 │   ├── mocks/         # Mock data factories
@@ -30,6 +32,7 @@ prefect/ui-v2/
 - **Tanstack Table** - table state management
 - **react-hook-form** - form state management
 - **Recharts** - charts and data visualization
+- **Pixi.js** - WebGL canvas rendering for run graphs (`src/graphs/`)
 - **Vitest** - testing framework
 - **Storybook** - component development and documentation
 - **MSW** - API mocking
@@ -98,10 +101,11 @@ Before committing any changes, always run:
 
 ## API Integration
 
-- Use **`useSuspenseQuery`** over `useQuery` for declarative code
+- Use **`useSuspenseQuery`** over `useQuery` for declarative code; use `useQuery` when the component must silently return `null` while loading rather than suspend the tree (e.g., optional or promotional components that should disappear rather than show a skeleton)
 - **Query factories** in `/api` directories with standardized key patterns
 - **Mutation hooks** in `/api` directories
 - **No data transformation** in query factories - do it in components
+- **Duration fields** (`estimated_run_time`, `total_run_time`, etc.) are returned in **seconds** by the API. Prefer `secondsToApproximateString`/`secondsToString` from `@/utils/seconds` for display — they take raw seconds directly. `humanizeDuration` and similar JS libraries expect milliseconds instead, so multiply by 1000 before passing to them
 
 ## Forms
 
@@ -109,6 +113,8 @@ Before committing any changes, always run:
 - **zod** for validation
 - **Form** and **FormField** components from shadcn/ui
 - **Stepper** component for wizard flows
+- **Forms bound to refetched queries**: Entity queries (deployments, etc.) refetch on a 30-second interval and on window focus, returning new object references each time. Use `useState` lazy initializers to capture default values once — do not sync form state via `useEffect`, which overwrites in-flight user edits on every refetch. Add `key={entity.id}` on the form component so it fully resets when the entity changes.
+- **Zod v4**: `z.record()` requires an explicit key schema — `z.record(z.string(), z.unknown())`, not the v3-style `z.record(z.unknown())`. `ZodError` instances expose `.issues`, not the removed `.errors`.
 
 ## Testing
 
@@ -123,6 +129,57 @@ Before committing any changes, always run:
 - Succinct commit messages
 - PR descriptions mention "Related to #15512"
 - Never commit directly to `main`
+
+## Styling for Light and Dark Mode
+
+The UI supports both light and dark themes. To ensure components render correctly in both modes:
+
+### Use Semantic Color Tokens
+
+Always use Tailwind's semantic color classes that automatically adapt to the current theme instead of hardcoded color values:
+
+| Instead of | Use |
+|------------|-----|
+| `bg-gray-100`, `bg-gray-200` | `bg-muted` |
+| `bg-white` | `bg-background` or `bg-card` |
+| `text-gray-500`, `text-gray-600` | `text-muted-foreground` |
+| `text-gray-900`, `text-black` | `text-foreground` |
+| `border-gray-200`, `border-gray-300` | `border-border` or `border-muted` |
+
+### For Dividers and Subtle Elements
+
+Use opacity modifiers with semantic colors for subtle visual elements like dividers:
+- `bg-muted-foreground/30` for subtle divider lines
+- `border-border` for standard borders
+
+### Prose Content in Dark Mode
+
+Tailwind's `prose` class (`@tailwindcss/typography`) does **not** automatically invert in dark mode. Any element using `prose` must also include `dark:prose-invert`:
+
+```tsx
+<div className="prose dark:prose-invert">...</div>
+```
+
+### CodeMirror Editors
+
+`@uiw/react-codemirror` does not follow the app theme automatically. Any component using `useCodeMirror` must explicitly read and pass the theme:
+
+```tsx
+const { resolvedTheme } = useTheme(); // from "next-themes"
+useCodeMirror({ theme: resolvedTheme === "dark" ? "dark" : "light", ... });
+```
+
+### Avoid Hardcoded Colors
+
+Never use hardcoded gray scale colors (e.g., `bg-gray-100`, `text-gray-500`) as these will not adapt to dark mode and can make text unreadable or create jarring visual contrast.
+
+### Testing Dark Mode
+
+Always verify components in both light and dark mode:
+1. Use the theme toggle in Settings to switch between modes
+2. Check that all text remains readable
+3. Verify backgrounds blend appropriately with the overall theme
+4. Ensure sufficient contrast for interactive elements
 
 ## Architecture Notes
 

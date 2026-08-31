@@ -4,7 +4,7 @@ import { RunCard } from "@/components/ui/run-card";
 type TaskRunConcurrencyLimitActiveTaskRunsProps = {
 	data: Array<{
 		taskRun: components["schemas"]["TaskRun"];
-		flowRun?: components["schemas"]["FlowRun"] | null;
+		flowRun?: components["schemas"]["FlowRunResponse"] | null;
 		flow?: components["schemas"]["Flow"] | null;
 	}>;
 };
@@ -12,6 +12,14 @@ type TaskRunConcurrencyLimitActiveTaskRunsProps = {
 export const TaskRunConcurrencyLimitActiveTaskRuns = ({
 	data,
 }: TaskRunConcurrencyLimitActiveTaskRunsProps) => {
+	if (data.length === 0) {
+		return (
+			<div className="flex flex-col items-center justify-center gap-3 p-4 text-center text-sm text-muted-foreground">
+				No active task runs
+			</div>
+		);
+	}
+
 	return (
 		<ul className="flex flex-col gap-2">
 			{data.map((d) => (

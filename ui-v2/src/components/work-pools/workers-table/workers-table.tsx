@@ -3,15 +3,10 @@ import type {
 	OnChangeFn,
 	PaginationState,
 } from "@tanstack/react-table";
-import {
-	getCoreRowModel,
-	getPaginationRowModel,
-	getSortedRowModel,
-	useReactTable,
-} from "@tanstack/react-table";
 import { useCallback, useMemo } from "react";
 import type { WorkPoolWorker } from "@/api/work-pools";
 import { DataTable } from "@/components/ui/data-table";
+import { useTable } from "@/lib/tanstack-table";
 import { cn } from "@/utils";
 import { createWorkersTableColumnsWithActions } from "./components/workers-table-columns";
 import { WorkersTableEmptyState } from "./components/workers-table-empty-state";
@@ -52,23 +47,35 @@ export const WorkersTable = ({
 
 	const handlePaginationChange: OnChangeFn<PaginationState> = useCallback(
 		(updater) => {
-			let newPagination = pagination;
-			if (typeof updater === "function") {
-				newPagination = updater(pagination);
-			} else {
-				newPagination = updater;
-			}
+			const newPagination =
+				typeof updater === "function" ? updater(pagination) : updater;
 			onPaginationChange(newPagination);
 		},
 		[pagination, onPaginationChange],
 	);
 
+	const sortedWorkers = useMemo(() => {
+		// Match v1 behaviour: ONLINE workers first, then by most recent heartbeat.
+		return [...workers].sort((a, b) => {
+			if (a.status !== b.status) {
+				return a.status === "ONLINE" ? -1 : 1;
+			}
+			const aTime = a.last_heartbeat_time
+				? new Date(a.last_heartbeat_time).getTime()
+				: 0;
+			const bTime = b.last_heartbeat_time
+				? new Date(b.last_heartbeat_time).getTime()
+				: 0;
+			return bTime - aTime;
+		});
+	}, [workers]);
+
 	const filteredWorkers = useMemo(() => {
-		if (!searchQuery) return workers;
-		return workers.filter((worker) =>
+		if (!searchQuery) return sortedWorkers;
+		return sortedWorkers.filter((worker) =>
 			worker.name.toLowerCase().includes(searchQuery.toLowerCase()),
 		);
-	}, [workers, searchQuery]);
+	}, [sortedWorkers, searchQuery]);
 
 	const columns = useMemo(
 		() =>
@@ -79,20 +86,14 @@ export const WorkersTable = ({
 		[workPoolName],
 	);
 
-	const table = useReactTable({
+	const table = useTable({
 		data: filteredWorkers,
 		columns,
-		getCoreRowModel: getCoreRowModel(),
-		getSortedRowModel: getSortedRowModel(),
-		getPaginationRowModel: getPaginationRowModel(),
 		manualPagination: false,
 		state: {
 			pagination,
 		},
 		onPaginationChange: handlePaginationChange,
-		initialState: {
-			sorting: [{ id: "name", desc: false }],
-		},
 	});
 
 	// Show empty state when no workers at all or no search results

@@ -14,7 +14,6 @@ import time
 import uuid
 from datetime import timedelta
 from multiprocessing import Process
-from typing import Any
 from unittest import mock
 
 import pytest
@@ -44,29 +43,17 @@ async def concurrency_limit():
 async def function_that_uses_async_concurrency_and_goes_belly_up(
     concurrency_limit_name: str,
 ):
-    original_sleep = asyncio.sleep
-
-    # Mock sleep so that the lease is renewed more quickly
-    async def mock_sleep(*args: Any, **kwargs: Any):
-        await original_sleep(0.1)
-
-    with mock.patch("asyncio.sleep", mock_sleep):
+    with mock.patch("prefect.concurrency._leases._RENEWAL_FRACTION", 0.01):
         async with concurrency(
             concurrency_limit_name, occupy=1, lease_duration=60, strict=True
         ):
-            await original_sleep(120)
+            await asyncio.sleep(120)
 
 
 def function_that_uses_sync_concurrency_and_goes_belly_up(
     concurrency_limit_name: str,
 ):
-    original_sleep = asyncio.sleep
-
-    # Mock sleep so that the lease is renewed more quickly
-    async def mock_sleep(*args: Any, **kwargs: Any):
-        await original_sleep(0.1)
-
-    with mock.patch("asyncio.sleep", mock_sleep):
+    with mock.patch("prefect.concurrency._leases._RENEWAL_FRACTION", 0.01):
         with sync_concurrency(
             concurrency_limit_name, occupy=1, lease_duration=60, strict=True
         ):
@@ -130,17 +117,20 @@ async def test_async_concurrency_with_leases(concurrency_limit: GlobalConcurrenc
     # Force lease to expire immediately
     await lease_storage.renew_lease(active_lease.id, timedelta(seconds=0))
 
-    # Wait for the lease to be revoked
-    while (await lease_storage.read_expired_lease_ids()) != []:
-        await asyncio.sleep(1)
-
-    # Check that the concurrency limit has no slots taken after the lease is revoked
+    # Wait for the repossessor to release the slot. The lease is removed from
+    # lease storage before the slot release is committed, so the API is the only
+    # reliable signal that the revocation finished.
     async with prefect.get_client() as client:
         limit = await client.read_global_concurrency_limit_by_name(
             name=concurrency_limit.name
         )
-        assert limit.limit == 1
-        assert limit.active_slots == 0
+        while limit.active_slots != 0:
+            await asyncio.sleep(1)
+            limit = await client.read_global_concurrency_limit_by_name(
+                name=concurrency_limit.name
+            )
+
+    assert limit.limit == 1
 
 
 async def test_async_concurrency_with_lease_renewal_failure(
@@ -171,8 +161,10 @@ async def test_async_concurrency_with_lease_renewal_failure(
 
     assert active_lease
 
-    # Revoke the current lease and create a new one to simulate a lease renewal failure
-    await lease_storage.revoke_lease(active_lease.id)
+    # Revoke the lease through the API to avoid a cross-process filesystem race
+    # where a concurrent renew_lease can recreate the file deleted by revoke_lease
+    async with prefect.get_client() as client:
+        await client.release_concurrency_slots_with_lease(lease_id=active_lease.id)
 
     # Wait for the process to exit cleanly before the configured sleep time
     process.join(timeout=10)
@@ -228,17 +220,20 @@ async def test_sync_concurrency_with_leases(concurrency_limit: GlobalConcurrency
     # Force lease to expire immediately
     await lease_storage.renew_lease(active_lease.id, timedelta(seconds=0))
 
-    # Wait for the lease to be revoked
-    while (await lease_storage.read_expired_lease_ids()) != []:
-        await asyncio.sleep(1)
-
-    # Check that the concurrency limit has no slots taken after the lease is revoked
+    # Wait for the repossessor to release the slot. The lease is removed from
+    # lease storage before the slot release is committed, so the API is the only
+    # reliable signal that the revocation finished.
     async with prefect.get_client() as client:
         limit = await client.read_global_concurrency_limit_by_name(
             name=concurrency_limit.name
         )
-        assert limit.limit == 1
-        assert limit.active_slots == 0
+        while limit.active_slots != 0:
+            await asyncio.sleep(1)
+            limit = await client.read_global_concurrency_limit_by_name(
+                name=concurrency_limit.name
+            )
+
+    assert limit.limit == 1
 
 
 async def test_sync_concurrency_with_lease_renewal_failure(
@@ -269,8 +264,10 @@ async def test_sync_concurrency_with_lease_renewal_failure(
 
     assert active_lease
 
-    # Revoke the current lease and create a new one to simulate a lease renewal failure
-    await lease_storage.revoke_lease(active_lease.id)
+    # Revoke the lease through the API to avoid a cross-process filesystem race
+    # where a concurrent renew_lease can recreate the file deleted by revoke_lease
+    async with prefect.get_client() as client:
+        await client.release_concurrency_slots_with_lease(lease_id=active_lease.id)
 
     # Wait for the process to exit cleanly before the configured sleep time
     process.join(timeout=10)

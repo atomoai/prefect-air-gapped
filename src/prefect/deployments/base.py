@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional
 import yaml
 from ruamel.yaml import YAML
 
+from prefect._internal.git import get_git_branch, get_git_remote_origin_url
 from prefect.client.schemas.objects import ConcurrencyLimitStrategy
 from prefect.client.schemas.schedules import IntervalSchedule
-from prefect.utilities._git import get_git_branch, get_git_remote_origin_url
 from prefect.utilities.annotations import NotSet
 from prefect.utilities.filesystem import create_default_ignore_file
 from prefect.utilities.templating import apply_values
@@ -53,9 +53,11 @@ def create_default_prefect_yaml(
     with prefect_file.open(mode="w") as f:
         # write header
         f.write(
-            "# Welcome to your prefect.yaml file! You can use this file for storing and"
-            " managing\n# configuration for deploying your flows. We recommend"
-            " committing this file to source\n# control along with your flow code.\n\n"
+            "---\n"
+            "# Welcome to your prefect.yaml file! You can use this file for\n"
+            "# storing and managing configuration for deploying your flows.\n"
+            "# We recommend committing this file to source control along\n"
+            "# with your flow code.\n\n"
         )
 
         f.write("# Generic metadata about this project\n")
@@ -74,8 +76,8 @@ def create_default_prefect_yaml(
 
         # push
         f.write(
-            "# push section allows you to manage if and how this project is uploaded to"
-            " remote locations\n"
+            "# push section allows you to manage if and how this project\n"
+            "# is uploaded to remote locations\n"
         )
         yaml.dump(
             {"push": contents.get("push", default_contents.get("push"))},
@@ -86,8 +88,8 @@ def create_default_prefect_yaml(
 
         # pull
         f.write(
-            "# pull section allows you to provide instructions for cloning this project"
-            " in remote locations\n"
+            "# pull section allows you to provide instructions for cloning\n"
+            "# this project in remote locations\n"
         )
         yaml.dump(
             {"pull": contents.get("pull", default_contents.get("pull"))},
@@ -98,8 +100,8 @@ def create_default_prefect_yaml(
 
         # deployments
         f.write(
-            "# the deployments section allows you to provide configuration for"
-            " deploying flows\n"
+            "# the deployments section allows you to provide configuration\n"
+            "# for deploying flows\n"
         )
         yaml.dump(
             {
@@ -251,6 +253,9 @@ def _format_deployment_for_saving_to_prefect_file(
                 concurrency_limit["collision_strategy"] = str(
                     concurrency_limit["collision_strategy"].value
                 )
+            concurrency_limit = {
+                k: v for k, v in concurrency_limit.items() if v is not None
+            }
         deployment["concurrency_limit"] = concurrency_limit
 
     return deployment
@@ -271,6 +276,33 @@ def _interval_schedule_to_dict(schedule: IntervalSchedule) -> dict[str, Any]:
     schedule_config["anchor_date"] = schedule_config["anchor_date"].isoformat()
 
     return schedule_config
+
+
+def _deployment_already_saved_to_prefect_file(
+    deployment: dict[str, Any],
+    prefect_file: Path = Path("prefect.yaml"),
+) -> bool:
+    """
+    Return True if `prefect.yaml` already contains a deployment entry matching the
+    given deployment's name and entrypoint.
+
+    Used to decide whether the interactive `prefect deploy` flow should offer to
+    persist a newly-created deployment: a deployment that is already declared in
+    the file does not need to be saved again, but a brand-new one (even when the
+    file otherwise exists) should still be offered up for saving.
+    """
+    if not prefect_file.exists():
+        return False
+
+    with prefect_file.open(mode="r") as f:
+        contents = yaml.safe_load(f) or {}
+
+    for existing in contents.get("deployments") or []:
+        if existing.get("name") == deployment.get("name") and existing.get(
+            "entrypoint"
+        ) == deployment.get("entrypoint"):
+            return True
+    return False
 
 
 def _save_deployment_to_prefect_file(

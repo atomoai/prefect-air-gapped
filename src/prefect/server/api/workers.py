@@ -2,25 +2,42 @@
 Routes for interacting with work queue objects.
 """
 
-from typing import TYPE_CHECKING, List, Optional
+from dataclasses import dataclass
+from logging import Logger
+from typing import TYPE_CHECKING, Any, List, Optional
 from uuid import UUID
 
 import sqlalchemy as sa
 from fastapi import (
-    BackgroundTasks,
     Body,
     Depends,
     HTTPException,
     Path,
+    WebSocket,
     status,
 )
 from packaging.version import Version
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import prefect.server.api.dependencies as dependencies
 import prefect.server.models as models
 import prefect.server.schemas as schemas
 from prefect._internal.uuid7 import uuid7
+from prefect.client.schemas.worker_channel import (
+    CLEANUP_DELIVERY_CAPABILITY,
+    WORK_POOL_SNAPSHOT_CAPABILITY,
+    WORKER_HEARTBEAT_CAPABILITY,
+    WorkerChannelCapability,
+    WorkerChannelCloseReason,
+    WorkerChannelProtocolError,
+    WorkerHelloFrame,
+    WorkerReadyFrame,
+    WorkPoolSnapshotPayload,
+    select_worker_channel_version,
+    validate_worker_channel_frame,
+)
+from prefect.logging import get_logger
 from prefect.server.api.validation import validate_job_variable_defaults_for_work_pool
 from prefect.server.database import PrefectDBInterface, provide_database_interface
 from prefect.server.models.deployments import mark_deployments_ready
@@ -30,17 +47,30 @@ from prefect.server.models.work_queues import (
 )
 from prefect.server.models.workers import emit_work_pool_status_event
 from prefect.server.schemas.statuses import WorkQueueStatus
+from prefect.server.utilities import subscriptions
+from prefect.server.utilities import worker_channel as worker_channel_utils
 from prefect.server.utilities.server import PrefectRouter
+from prefect.server.worker_communication.cleanup_queue import (
+    WorkerCleanupQueue,
+    get_worker_cleanup_queue,
+)
 from prefect.types import DateTime
 from prefect.types._datetime import now
 
 if TYPE_CHECKING:
-    from prefect.server.database.orm_models import ORMWorkQueue
+    from prefect.server.database.orm_models import WorkPool as ORMWorkPool
+    from prefect.server.database.orm_models import WorkQueue as ORMWorkQueue
 
 router: PrefectRouter = PrefectRouter(
     prefix="/work_pools",
     tags=["Work Pools"],
 )
+logger: Logger = get_logger("prefect.server.api.workers")
+
+_OSS_WORKER_CHANNEL_REQUIRED_CAPABILITIES: list[WorkerChannelCapability] = [
+    WORKER_HEARTBEAT_CAPABILITY,
+    WORK_POOL_SNAPSHOT_CAPABILITY,
+]
 
 
 # -----------------------------------------------------
@@ -146,6 +176,278 @@ class WorkerLookups:
         return queue.id
 
 
+class WorkerChannelSetupError(Exception):
+    def __init__(self, close_reason: WorkerChannelCloseReason, detail: str):
+        super().__init__(detail)
+        self.close_reason = close_reason
+        self.detail = detail
+
+
+@dataclass(frozen=True)
+class WorkerChannelWorkPoolUpdateEvent:
+    work_pool_id: UUID
+    changed_fields: dict[str, dict[str, Any]]
+
+
+def _worker_requested_cleanup_delivery(hello: WorkerHelloFrame) -> bool:
+    return (
+        CLEANUP_DELIVERY_CAPABILITY in hello.payload.requested_capabilities
+        and bool(hello.payload.handled_cleanup_kinds)
+        and hello.payload.max_cleanup_concurrency > 0
+    )
+
+
+def _accepted_worker_channel_capabilities(
+    hello: WorkerHelloFrame,
+    *,
+    cleanup_queue_available: bool,
+) -> list[WorkerChannelCapability]:
+    accepted = list(_OSS_WORKER_CHANNEL_REQUIRED_CAPABILITIES)
+    if cleanup_queue_available and _worker_requested_cleanup_delivery(hello):
+        accepted.append(CLEANUP_DELIVERY_CAPABILITY)
+
+    return accepted
+
+
+async def _receive_worker_hello(websocket: WebSocket) -> WorkerHelloFrame:
+    try:
+        message = await websocket.receive_json()
+        frame = validate_worker_channel_frame(message)
+    except ValidationError as exc:
+        raise WorkerChannelSetupError(
+            WorkerChannelCloseReason.PROTOCOL_ERROR,
+            "Worker channel received a malformed hello frame",
+        ) from exc
+    except ValueError as exc:
+        raise WorkerChannelSetupError(
+            WorkerChannelCloseReason.PROTOCOL_ERROR,
+            "Worker channel received invalid JSON during setup",
+        ) from exc
+
+    if not isinstance(frame, WorkerHelloFrame):
+        raise WorkerChannelSetupError(
+            WorkerChannelCloseReason.PROTOCOL_ERROR,
+            "Expected worker.hello.v1 during worker channel setup",
+        )
+
+    return frame
+
+
+async def _resolve_worker_channel_work_pool(
+    session: AsyncSession,
+    work_pool_name: str,
+    hello: WorkerHelloFrame,
+) -> "ORMWorkPool":
+    work_pool = await models.workers.read_work_pool_by_name(
+        session=session,
+        work_pool_name=work_pool_name,
+    )
+
+    default_base_job_template = hello.payload.default_base_job_template
+    if work_pool is None:
+        if not hello.payload.create_pool_if_not_found:
+            raise WorkerChannelSetupError(
+                WorkerChannelCloseReason.AUTHORIZATION_FAILED,
+                "work_pool_not_found",
+            )
+
+        if work_pool_name.lower().startswith("prefect"):
+            raise WorkerChannelSetupError(
+                WorkerChannelCloseReason.AUTHORIZATION_FAILED,
+                "work_pool_creation_unauthorized",
+            )
+
+        await validate_job_variable_defaults_for_work_pool(
+            session, work_pool_name, default_base_job_template
+        )
+        try:
+            async with session.begin_nested():
+                work_pool = await models.workers.create_work_pool(
+                    session=session,
+                    work_pool=schemas.actions.WorkPoolCreate(
+                        name=work_pool_name,
+                        type=hello.payload.worker_type,
+                        base_job_template=default_base_job_template,
+                    ),
+                )
+        except sa.exc.IntegrityError:
+            work_pool = await models.workers.read_work_pool_by_name(
+                session=session,
+                work_pool_name=work_pool_name,
+            )
+            if work_pool is None:
+                raise
+        return work_pool
+
+    return work_pool
+
+
+async def _resolve_worker_channel_work_queues(
+    session: AsyncSession,
+    work_pool_id: UUID,
+    work_pool_name: str,
+    work_queue_names: list[str],
+) -> list["ORMWorkQueue"]:
+    if not work_queue_names:
+        return list(
+            await models.workers.read_work_queues(
+                session=session, work_pool_id=work_pool_id
+            )
+        )
+
+    work_queues = []
+    for work_queue_name in dict.fromkeys(work_queue_names):
+        work_queue = await models.workers.read_work_queue_by_name(
+            session=session,
+            work_pool_name=work_pool_name,
+            work_queue_name=work_queue_name,
+        )
+        if work_queue is None:
+            raise WorkerChannelSetupError(
+                WorkerChannelCloseReason.AUTHORIZATION_FAILED,
+                "work_queue_not_found",
+            )
+        work_queues.append(work_queue)
+
+    return work_queues
+
+
+async def _build_worker_ready_frame(
+    session: AsyncSession,
+    work_pool_name: str,
+    hello: WorkerHelloFrame,
+    cleanup_queue_available: bool,
+) -> tuple[WorkerReadyFrame, WorkerChannelWorkPoolUpdateEvent | None]:
+    try:
+        selected_channel_version = select_worker_channel_version(
+            hello.payload.supported_channel_versions
+        )
+    except WorkerChannelProtocolError as exc:
+        raise WorkerChannelSetupError(exc.close_reason, str(exc)) from exc
+
+    work_pool = await _resolve_worker_channel_work_pool(
+        session=session,
+        work_pool_name=work_pool_name,
+        hello=hello,
+    )
+    work_queues = await _resolve_worker_channel_work_queues(
+        session=session,
+        work_pool_id=work_pool.id,
+        work_pool_name=work_pool_name,
+        work_queue_names=hello.payload.work_queue_names,
+    )
+    default_base_job_template = hello.payload.default_base_job_template
+    work_pool_update_event = None
+    if not work_pool.base_job_template and default_base_job_template:
+        previous_base_job_template = work_pool.base_job_template
+        await validate_job_variable_defaults_for_work_pool(
+            session, work_pool_name, default_base_job_template
+        )
+        updated = await models.workers.update_work_pool(
+            session=session,
+            work_pool_id=work_pool.id,
+            work_pool=schemas.actions.WorkPoolUpdate(
+                base_job_template=default_base_job_template
+            ),
+            emit_update_event=False,
+            emit_status_change=emit_work_pool_status_event,
+        )
+        if updated:
+            work_pool_update_event = WorkerChannelWorkPoolUpdateEvent(
+                work_pool_id=work_pool.id,
+                changed_fields={
+                    "base_job_template": {
+                        "from": previous_base_job_template,
+                        "to": default_base_job_template,
+                    }
+                },
+            )
+        refreshed = await models.workers.read_work_pool(
+            session=session, work_pool_id=work_pool.id
+        )
+        assert refreshed is not None
+        work_pool = refreshed
+
+    try:
+        worker = await models.workers.record_worker_heartbeat(
+            session=session,
+            work_pool=work_pool,
+            worker_name=hello.payload.worker_name,
+            heartbeat_interval_seconds=hello.payload.heartbeat_interval_seconds,
+            emit_status_change=emit_work_pool_status_event,
+            return_worker=True,
+        )
+    except Exception as exc:
+        raise WorkerChannelSetupError(
+            WorkerChannelCloseReason.HEARTBEAT_PERSISTENCE_FAILED,
+            "worker_channel_initial_heartbeat_failed",
+        ) from exc
+    assert worker is not None
+
+    refreshed_work_pool = await models.workers.read_work_pool(
+        session=session, work_pool_id=work_pool.id
+    )
+    assert refreshed_work_pool is not None
+    initial_snapshot = WorkPoolSnapshotPayload(
+        snapshot_sequence=1,
+        reason="initial",
+        work_pool=await worker_channel_utils.build_worker_channel_work_pool_snapshot(
+            session=session,
+            work_pool=refreshed_work_pool,
+        ),
+    )
+
+    requested_capabilities = list(dict.fromkeys(hello.payload.requested_capabilities))
+    accepted = _accepted_worker_channel_capabilities(
+        hello,
+        cleanup_queue_available=cleanup_queue_available,
+    )
+    accepted_set = set(accepted)
+    rejected = [
+        capability
+        for capability in requested_capabilities
+        if capability not in accepted_set
+    ]
+
+    if rejected:
+        logger.debug(
+            "Worker channel capabilities rejected: "
+            "work_pool=%s worker_name=%s rejected=%s",
+            work_pool_name,
+            hello.payload.worker_name,
+            rejected,
+        )
+
+    return (
+        WorkerReadyFrame(
+            type="worker.ready.v1",
+            id=uuid7(),
+            sent_at=now("UTC"),
+            payload={
+                "consumer_id": hello.payload.consumer_id,
+                "worker_id": None,
+                "selected_channel_version": selected_channel_version,
+                "effective_heartbeat_interval_seconds": (
+                    hello.payload.heartbeat_interval_seconds
+                ),
+                "accepted_capabilities": accepted,
+                "rejected_capabilities": rejected,
+                "effective_max_cleanup_concurrency": (
+                    hello.payload.max_cleanup_concurrency
+                    if CLEANUP_DELIVERY_CAPABILITY in accepted_set
+                    else 0
+                ),
+                "resolved_work_queues": [
+                    {"id": work_queue.id, "name": work_queue.name}
+                    for work_queue in work_queues
+                ],
+                "initial_snapshot": initial_snapshot,
+            },
+        ),
+        work_pool_update_event,
+    )
+
+
 # -----------------------------------------------------
 # --
 # --
@@ -162,7 +464,7 @@ async def create_work_pool(
     prefect_client_version: Optional[str] = Depends(
         dependencies.get_prefect_client_version
     ),
-) -> schemas.core.WorkPool:
+) -> schemas.responses.WorkPoolResponse:
     """
     Creates a new work pool. If a work pool with the same
     name already exists, an error will be raised.
@@ -191,7 +493,11 @@ async def create_work_pool(
                 work_pool=model,
             )
 
-            ret = schemas.core.WorkPool.model_validate(model, from_attributes=True)
+            ret = schemas.responses.WorkPoolResponse.model_validate(
+                model, from_attributes=True
+            )
+            if ret.concurrency_limit is not None:
+                ret.active_slots = 0
             if prefect_client_version and Version(prefect_client_version) <= Version(
                 "3.3.7"
             ):
@@ -215,7 +521,7 @@ async def read_work_pool(
     prefect_client_version: Optional[str] = Depends(
         dependencies.get_prefect_client_version
     ),
-) -> schemas.core.WorkPool:
+) -> schemas.responses.WorkPoolResponse:
     """
     Read a work pool by name
     """
@@ -227,9 +533,14 @@ async def read_work_pool(
         orm_work_pool = await models.workers.read_work_pool(
             session=session, work_pool_id=work_pool_id
         )
-        work_pool = schemas.core.WorkPool.model_validate(
+        work_pool = schemas.responses.WorkPoolResponse.model_validate(
             orm_work_pool, from_attributes=True
         )
+
+        if work_pool.concurrency_limit is not None:
+            work_pool.active_slots = await models.workers.count_work_pool_active_slots(
+                session=session, work_pool_id=work_pool_id
+            )
 
         if prefect_client_version and Version(prefect_client_version) <= Version(
             "3.3.7"
@@ -250,7 +561,7 @@ async def read_work_pools(
     prefect_client_version: Optional[str] = Depends(
         dependencies.get_prefect_client_version
     ),
-) -> List[schemas.core.WorkPool]:
+) -> List[schemas.responses.WorkPoolResponse]:
     """
     Read multiple work pools
     """
@@ -262,9 +573,17 @@ async def read_work_pools(
             limit=limit,
         )
         ret = [
-            schemas.core.WorkPool.model_validate(w, from_attributes=True)
+            schemas.responses.WorkPoolResponse.model_validate(w, from_attributes=True)
             for w in orm_work_pools
         ]
+        pools_with_limit = [wp for wp in ret if wp.concurrency_limit is not None]
+        if pools_with_limit:
+            slot_counts = await models.workers.count_work_pool_active_slots_bulk(
+                session=session,
+                work_pool_ids=[wp.id for wp in pools_with_limit],
+            )
+            for work_pool in pools_with_limit:
+                work_pool.active_slots = slot_counts.get(work_pool.id, 0)
         if prefect_client_version and Version(prefect_client_version) <= Version(
             "3.3.7"
         ):
@@ -317,11 +636,21 @@ async def update_work_pool(
         work_pool_id = await worker_lookups._get_work_pool_id_from_name(
             session=session, work_pool_name=work_pool_name
         )
-        await models.workers.update_work_pool(
+        updated = await models.workers.update_work_pool(
             session=session,
             work_pool_id=work_pool_id,
             work_pool=work_pool,
             emit_status_change=emit_work_pool_status_event,
+        )
+
+    if updated and worker_channel_utils.work_pool_update_triggers_snapshot(
+        update_values
+    ):
+        await worker_channel_utils.publish_snapshot_invalidation(
+            worker_channel_utils.WorkerChannelSnapshotInvalidation(
+                work_pool_id=work_pool_id,
+                reason="work_pool_updated",
+            )
         )
 
 
@@ -349,14 +678,137 @@ async def delete_work_pool(
             session=session, work_pool_name=work_pool_name
         )
 
-        await models.workers.delete_work_pool(
+        deleted = await models.workers.delete_work_pool(
             session=session, work_pool_id=work_pool_id
         )
+
+    if deleted:
+        await worker_channel_utils.publish_snapshot_invalidation(
+            worker_channel_utils.WorkerChannelSnapshotInvalidation(
+                work_pool_id=work_pool_id,
+                reason="work_pool_deleted",
+                work_pool_deleted=True,
+            )
+        )
+
+
+@router.post("/{name}/concurrency_status")
+async def read_work_pool_concurrency_status(
+    work_pool_name: str = Path(..., description="The work pool name", alias="name"),
+    page: int = Body(1, ge=1),
+    limit: int = dependencies.LimitBody(),
+    flow_run_limit: int = Body(10, ge=0, le=200, description="Max flow runs per queue"),
+    worker_lookups: WorkerLookups = Depends(WorkerLookups),
+    db: PrefectDBInterface = Depends(provide_database_interface),
+) -> schemas.responses.WorkPoolConcurrencyStatus:
+    """
+    Read concurrency status for a work pool, including per-queue breakdown
+    with flow run summaries. Queues are paginated; flow runs per queue are
+    capped by flow_run_limit.
+    """
+    import asyncio
+
+    from prefect.types._datetime import now as prefect_now
+
+    queue_offset = (page - 1) * limit
+
+    async with db.session_context() as session:
+        work_pool = await models.workers.read_work_pool_by_name(
+            session=session, work_pool_name=work_pool_name
+        )
+        if not work_pool:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Work pool {work_pool_name!r} not found.",
+            )
+
+        # Paginate queues in the DB and get total count + active slots
+        # concurrently
+        (
+            work_queues_page,
+            total_queue_count,
+            total_active,
+            counts_by_queue,
+        ) = await asyncio.gather(
+            models.workers.read_work_queues(
+                session=session,
+                work_pool_id=work_pool.id,
+                offset=queue_offset,
+                limit=limit,
+            ),
+            models.workers.count_work_queues(
+                session=session,
+                work_pool_id=work_pool.id,
+            ),
+            models.workers.count_work_pool_slot_holders(
+                session=session,
+                work_pool_id=work_pool.id,
+            ),
+            models.workers.count_work_pool_slot_holders_by_queue(
+                session=session,
+                work_pool_id=work_pool.id,
+            ),
+        )
+
+        # Only fetch flow run details for the queues on this page
+        page_queue_ids = [wq.id for wq in work_queues_page]
+        slot_holders = await models.workers.get_work_pool_slot_holders(
+            session=session,
+            work_pool_id=work_pool.id,
+            work_queue_ids=page_queue_ids,
+            flow_run_limit=flow_run_limit,
+        )
+
+    current_time = prefect_now("UTC")
+
+    # Group flow runs by work queue id
+    runs_by_queue: dict[UUID, list[tuple]] = {}
+    for run, slot_acquired_at in slot_holders:
+        queue_id = run.work_queue_id
+        if queue_id is not None:
+            runs_by_queue.setdefault(queue_id, []).append((run, slot_acquired_at))
+
+    def _build_summary(run, slot_acquired_at) -> schemas.responses.FlowRunSlotSummary:
+        state_ts = run.state_timestamp
+        return schemas.responses.FlowRunSlotSummary(
+            id=run.id,
+            name=run.name,
+            state_type=run.state_type if run.state_type else None,
+            state_name=run.state_name if run.state_name else None,
+            start_time=run.start_time,
+            state_timestamp=state_ts,
+            time_in_current_state=((current_time - state_ts) if state_ts else None),
+        )
+
+    queue_details = []
+    for wq in work_queues_page:
+        display_tuples = runs_by_queue.get(wq.id, [])
+        active = counts_by_queue.get(wq.id, 0)
+        queue_details.append(
+            schemas.responses.WorkQueueConcurrencyStatusDetail(
+                queue_id=wq.id,
+                queue_name=wq.name,
+                active_slots=active,
+                concurrency_limit=wq.concurrency_limit,
+                flow_runs=[_build_summary(r, sa) for r, sa in display_tuples],
+                flow_run_count=active,
+            )
+        )
+
+    return schemas.responses.WorkPoolConcurrencyStatus(
+        active_slots=total_active,
+        concurrency_limit=work_pool.concurrency_limit,
+        queues=queue_details,
+        count=total_queue_count,
+        limit=limit,
+        pages=(total_queue_count + limit - 1) // limit if limit > 0 else 0,
+        page=page,
+    )
 
 
 @router.post("/{name}/get_scheduled_flow_runs")
 async def get_scheduled_flow_runs(
-    background_tasks: BackgroundTasks,
+    docket: dependencies.Docket,
     work_pool_name: str = Path(..., description="The work pool name", alias="name"),
     work_queue_names: List[str] = Body(
         None, description="The names of work pool queues"
@@ -409,9 +861,10 @@ async def get_scheduled_flow_runs(
             limit=limit,
         )
 
-    background_tasks.add_task(
+    await docket.add(
         mark_work_queues_ready,
-        db=db,
+        key=f"mark_work_queues_ready:work_pool:{work_pool_id}",
+    )(
         polled_work_queue_ids=[
             wq.id for wq in work_queues if wq.status != WorkQueueStatus.NOT_READY
         ],
@@ -420,9 +873,10 @@ async def get_scheduled_flow_runs(
         ],
     )
 
-    background_tasks.add_task(
+    await docket.add(
         mark_deployments_ready,
-        db=db,
+        key=f"mark_deployments_ready:work_pool:{work_pool_id}",
+    )(
         work_queue_ids=[wq.id for wq in work_queues],
     )
 
@@ -464,6 +918,12 @@ async def create_work_queue(
                 work_pool_id=work_pool_id,
                 work_queue=work_queue,
             )
+
+            response = schemas.responses.WorkQueueResponse.model_validate(
+                model, from_attributes=True
+            )
+            if response.concurrency_limit is not None:
+                response.active_slots = 0
     except sa.exc.IntegrityError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -473,9 +933,7 @@ async def create_work_queue(
             ),
         )
 
-    return schemas.responses.WorkQueueResponse.model_validate(
-        model, from_attributes=True
-    )
+    return response
 
 
 @router.get("/{work_pool_name}/queues/{name}")
@@ -502,9 +960,16 @@ async def read_work_queue(
             session=session, work_queue_id=work_queue_id
         )
 
-    return schemas.responses.WorkQueueResponse.model_validate(
-        model, from_attributes=True
-    )
+        response = schemas.responses.WorkQueueResponse.model_validate(
+            model, from_attributes=True
+        )
+
+        if response.concurrency_limit is not None:
+            response.active_slots = await models.workers.count_work_queue_active_slots(
+                session=session, work_queue_id=work_queue_id
+            )
+
+    return response
 
 
 @router.post("/{work_pool_name}/queues/filter")
@@ -532,10 +997,20 @@ async def read_work_queues(
             offset=offset,
         )
 
-    return [
-        schemas.responses.WorkQueueResponse.model_validate(wq, from_attributes=True)
-        for wq in wqs
-    ]
+        ret = [
+            schemas.responses.WorkQueueResponse.model_validate(wq, from_attributes=True)
+            for wq in wqs
+        ]
+        queues_with_limit = [wq for wq in ret if wq.concurrency_limit is not None]
+        if queues_with_limit:
+            slot_counts = await models.workers.count_work_queue_active_slots_bulk(
+                session=session,
+                work_queue_ids=[wq.id for wq in queues_with_limit],
+            )
+            for wq_response in queues_with_limit:
+                wq_response.active_slots = slot_counts.get(wq_response.id, 0)
+
+    return ret
 
 
 @router.patch("/{work_pool_name}/queues/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -551,8 +1026,11 @@ async def update_work_queue(
     """
     Update a work pool queue
     """
-
     async with db.session_context(begin_transaction=True) as session:
+        await worker_lookups._get_work_pool_id_from_name(
+            session=session,
+            work_pool_name=work_pool_name,
+        )
         work_queue_id = await worker_lookups._get_work_queue_id_from_name(
             work_pool_name=work_pool_name,
             work_queue_name=work_queue_name,
@@ -583,6 +1061,10 @@ async def delete_work_queue(
     """
 
     async with db.session_context(begin_transaction=True) as session:
+        await worker_lookups._get_work_pool_id_from_name(
+            session=session,
+            work_pool_name=work_pool_name,
+        )
         work_queue_id = await worker_lookups._get_work_queue_id_from_name(
             session=session,
             work_pool_name=work_pool_name,
@@ -601,6 +1083,125 @@ async def delete_work_queue(
 # --
 # --
 # -----------------------------------------------------
+
+
+@router.websocket("/{work_pool_name}/workers/connect")
+async def worker_channel_connect(
+    websocket: WebSocket,
+    work_pool_name: str = Path(..., description="The work pool name"),
+    db: PrefectDBInterface = Depends(provide_database_interface),
+) -> None:
+    websocket = await subscriptions.accept_prefect_socket(
+        websocket,
+        require_prefect_subprotocol=True,
+        authentication_failed_reason=WorkerChannelCloseReason.AUTHENTICATION_FAILED.value,
+    )
+    if not websocket:
+        return
+
+    try:
+        hello = await _receive_worker_hello(websocket)
+        cleanup_queue: WorkerCleanupQueue | None = None
+        if _worker_requested_cleanup_delivery(hello):
+            try:
+                cleanup_queue = get_worker_cleanup_queue()
+            except Exception:
+                logger.exception(
+                    "Worker cleanup delivery queue initialization failed; "
+                    "rejecting cleanup delivery capability"
+                )
+
+        async with worker_channel_utils.messaging.ephemeral_subscription(
+            worker_channel_utils.WORKER_CHANNEL_SNAPSHOT_TOPIC,
+        ) as consumer_kwargs:
+            async with db.session_context(begin_transaction=True) as session:
+                ready, work_pool_update_event = await _build_worker_ready_frame(
+                    session=session,
+                    work_pool_name=work_pool_name,
+                    hello=hello,
+                    cleanup_queue_available=cleanup_queue is not None,
+                )
+
+            if work_pool_update_event is not None:
+                async with db.session_context() as session:
+                    work_pool = await models.workers.read_work_pool(
+                        session=session,
+                        work_pool_id=work_pool_update_event.work_pool_id,
+                    )
+                    assert work_pool is not None
+                    await models.workers.emit_work_pool_updated_event(
+                        session=session,
+                        work_pool=work_pool,
+                        changed_fields=work_pool_update_event.changed_fields,
+                    )
+                await worker_channel_utils.publish_snapshot_invalidation(
+                    worker_channel_utils.WorkerChannelSnapshotInvalidation(
+                        work_pool_id=work_pool_update_event.work_pool_id,
+                        reason="work_pool_updated",
+                    )
+                )
+
+            connection = worker_channel_utils.WorkerChannelConnection(
+                websocket=websocket,
+                db=db,
+                work_pool_name=work_pool_name,
+                work_pool_id=ready.payload.initial_snapshot.work_pool.id,
+                consumer_id=hello.payload.consumer_id,
+                worker_name=hello.payload.worker_name,
+                work_pool_updated=ready.payload.initial_snapshot.work_pool.updated,
+                cleanup_queue=(
+                    cleanup_queue
+                    if CLEANUP_DELIVERY_CAPABILITY
+                    in ready.payload.accepted_capabilities
+                    else None
+                ),
+                cleanup_kinds=tuple(hello.payload.handled_cleanup_kinds),
+                cleanup_work_queue_ids=tuple(
+                    work_queue.id for work_queue in ready.payload.resolved_work_queues
+                ),
+                max_cleanup_concurrency=ready.payload.effective_max_cleanup_concurrency,
+            )
+            await connection.run(ready, consumer_kwargs)
+
+    except WorkerChannelSetupError as exc:
+        logger.debug(
+            "Worker channel setup failed: work_pool=%s reason=%s detail=%s",
+            work_pool_name,
+            exc.close_reason.value,
+            exc.detail,
+        )
+        if worker_channel_utils.WORKER_CHANNEL_CONNECTIONS is not None:
+            worker_channel_utils.WORKER_CHANNEL_CONNECTIONS.labels(
+                event="setup_failed"
+            ).inc()
+        await worker_channel_utils.close_worker_channel(websocket, exc.close_reason)
+    except HTTPException as exc:
+        logger.debug(
+            "Worker channel setup failed HTTP validation: work_pool=%s detail=%s",
+            work_pool_name,
+            exc.detail,
+        )
+        if worker_channel_utils.WORKER_CHANNEL_CONNECTIONS is not None:
+            worker_channel_utils.WORKER_CHANNEL_CONNECTIONS.labels(
+                event="setup_failed"
+            ).inc()
+        await worker_channel_utils.close_worker_channel(
+            websocket, WorkerChannelCloseReason.PROTOCOL_ERROR
+        )
+    except subscriptions.NORMAL_DISCONNECT_EXCEPTIONS:
+        return
+    except Exception:
+        logger.exception(
+            "Worker channel setup failed due to a transient server error: work_pool=%s",
+            work_pool_name,
+        )
+        if worker_channel_utils.WORKER_CHANNEL_CONNECTIONS is not None:
+            worker_channel_utils.WORKER_CHANNEL_CONNECTIONS.labels(
+                event="setup_failed"
+            ).inc()
+        await worker_channel_utils.close_worker_channel(
+            websocket, WorkerChannelCloseReason.TRANSIENT_SERVER_ERROR
+        )
 
 
 @router.post(
@@ -627,22 +1228,13 @@ async def worker_heartbeat(
                 detail=f'Work pool "{work_pool_name}" not found.',
             )
 
-        await models.workers.worker_heartbeat(
+        await models.workers.record_worker_heartbeat(
             session=session,
-            work_pool_id=work_pool.id,
+            work_pool=work_pool,
             worker_name=name,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            emit_status_change=emit_work_pool_status_event,
         )
-
-        if work_pool.status == schemas.statuses.WorkPoolStatus.NOT_READY:
-            await models.workers.update_work_pool(
-                session=session,
-                work_pool_id=work_pool.id,
-                work_pool=schemas.internal.InternalWorkPoolUpdate(
-                    status=schemas.statuses.WorkPoolStatus.READY
-                ),
-                emit_status_change=emit_work_pool_status_event,
-            )
 
 
 @router.post("/{work_pool_name}/workers/filter")

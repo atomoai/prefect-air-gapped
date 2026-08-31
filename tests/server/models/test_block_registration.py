@@ -1,9 +1,12 @@
+from unittest.mock import patch
+
 import pytest
 
 from prefect.blocks.core import Block
 from prefect.blocks.system import Secret
 from prefect.server.models.block_registration import (
     _load_collection_blocks_data,
+    _register_registry_blocks,
     register_block_schema,
     register_block_type,
     run_block_auto_registration,
@@ -13,23 +16,28 @@ from prefect.server.models.block_types import read_block_type_by_slug, read_bloc
 from prefect.settings import PREFECT_API_BLOCKS_REGISTER_ON_START, temporary_settings
 from prefect.utilities.dispatch import get_registry_for_type
 
+pytestmark = pytest.mark.clear_db
+
 
 @pytest.fixture(scope="module")
-async def expected_number_of_registered_block_types():
+async def expected_registered_block_type_slugs() -> set[str]:
     collections_blocks_data = await _load_collection_blocks_data()
 
-    block_types_from_collections = [
-        block_type
+    collection_block_type_slugs = {
+        block_type["slug"]
         for collection in collections_blocks_data["collections"].values()
         for block_type in collection["block_types"].values()
-    ]
+    }
     block_registry = get_registry_for_type(Block) or {}
-    return len(block_types_from_collections) + len(block_registry.values())
+    registry_block_type_slugs = {
+        block_class._to_block_type().slug for block_class in block_registry.values()
+    }
+    return collection_block_type_slugs | registry_block_type_slugs
 
 
 class TestRunAutoRegistration:
     async def test_full_registration_with_empty_database(
-        self, session, expected_number_of_registered_block_types
+        self, session, expected_registered_block_type_slugs
     ):
         PROTECTED_BLOCKS = {
             "secret",
@@ -45,9 +53,8 @@ class TestRunAutoRegistration:
         await session.commit()
 
         registered_blocks = await read_block_types(session)
-        assert len(registered_blocks) == expected_number_of_registered_block_types
-
         registered_block_slugs = {b.slug for b in registered_blocks}
+        assert registered_block_slugs == expected_registered_block_type_slugs
         assert PROTECTED_BLOCKS.issubset(registered_block_slugs), (
             "When changing protected blocks, edit PROTECTED_BLOCKS defined above"
         )
@@ -56,7 +63,7 @@ class TestRunAutoRegistration:
         ), "When changing protected blocks, edit PROTECTED_BLOCKS defined above"
 
     async def test_registration_works_with_populated_database(
-        self, session, expected_number_of_registered_block_types
+        self, session, expected_registered_block_type_slugs
     ):
         with temporary_settings({PREFECT_API_BLOCKS_REGISTER_ON_START: True}):
             await run_block_auto_registration(session=session)
@@ -65,7 +72,8 @@ class TestRunAutoRegistration:
             registered_blocks = await read_block_types(session)
 
             # this assertion assumes that users cannot protect blocks manually
-            assert len(registered_blocks) == expected_number_of_registered_block_types
+            registered_block_slugs = {b.slug for b in registered_blocks}
+            assert registered_block_slugs == expected_registered_block_type_slugs
 
 
 class TestRegisterBlockType:
@@ -136,3 +144,43 @@ class TestRegisterBlockSchema:
         )
 
         assert first_registered_block_schema_id == second_registered_block_schema_id
+
+
+class TestRegistryIterationSafety:
+    async def test_register_registry_blocks_tolerates_concurrent_registration(
+        self, session
+    ):
+        """Regression test: _register_registry_blocks must not crash when a new
+        block class is registered in the global dispatch registry during iteration
+        (e.g. an integration block imported lazily during server startup).
+        """
+        real_registry = get_registry_for_type(Block) or {}
+
+        # A mutable dict we control — starts with one entry from the real registry
+        first_key = next(iter(real_registry))
+        mutable_registry: dict[str, type] = {first_key: real_registry[first_key]}
+
+        call_count = 0
+        original_register_block_type = register_block_type
+
+        async def mutating_register_block_type(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            # Simulate a new block class being registered mid-iteration
+            mutable_registry["late-registered-block"] = Secret
+            return await original_register_block_type(**kwargs)
+
+        with (
+            patch(
+                "prefect.utilities.dispatch.get_registry_for_type",
+                return_value=mutable_registry,
+            ),
+            patch(
+                "prefect.server.models.block_registration.register_block_type",
+                side_effect=mutating_register_block_type,
+            ),
+        ):
+            # Should not raise RuntimeError: dictionary changed size during iteration
+            await _register_registry_blocks(session)
+
+        assert call_count == 1

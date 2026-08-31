@@ -27,6 +27,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, InvalidResponse, Prompt, PromptBase
 from rich.table import Table
 
+from prefect._internal.ast_utils import find_flow_functions_in_file
+from prefect._internal.git import get_git_remote_origin_url
 from prefect._internal.installation import ainstall_packages
 from prefect.cli._utilities import exit_with_error
 from prefect.client.collections import get_collections_metadata_client
@@ -45,8 +47,6 @@ from prefect.exceptions import ObjectAlreadyExists, ObjectNotFound
 from prefect.flows import load_flow_from_entrypoint
 from prefect.logging.loggers import get_logger
 from prefect.utilities import urls
-from prefect.utilities._ast import find_flow_functions_in_file
-from prefect.utilities._git import get_git_remote_origin_url
 from prefect.utilities.filesystem import filter_files
 from prefect.utilities.slugify import slugify
 
@@ -102,7 +102,8 @@ async def search_for_flow_functions(
         logger.error(f"Error searching for flow functions: {e}")
         return []
 
-    return [fn for file_fns in await asyncio.gather(*coros) for fn in file_fns]
+    flows = [fn for file_fns in await asyncio.gather(*coros) for fn in file_fns]
+    return sorted(flows, key=lambda x: (x["filepath"], x["function_name"]))
 
 
 def prompt(message: str, **kwargs: Any) -> str:
@@ -663,9 +664,7 @@ class EntrypointPrompt(PromptBase[str]):
     validate_error_message = "[prompt.invalid]Please enter a valid flow entrypoint."
 
     def process_response(self, value: str) -> str:
-        try:
-            value.rsplit(":", 1)
-        except ValueError:
+        if ":" not in value and "." not in value:
             raise InvalidResponse(self.validate_error_message)
 
         try:

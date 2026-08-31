@@ -1,12 +1,15 @@
 import asyncio
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import AsyncGenerator, Generator, Optional
+from unittest.mock import patch
 
 import anyio
 import pytest
+from prefect_redis.client import _client_cache, clear_cached_clients
 from prefect_redis.messaging import (
     Cache,
     Consumer,
@@ -14,11 +17,18 @@ from prefect_redis.messaging import (
     Publisher,
     RedisMessagingConsumerSettings,
     RedisMessagingPublisherSettings,
+    RedisStreamsMessage,
     StopConsumer,
     _cleanup_empty_consumer_groups,
+    _deduplication_key,
+    _dlq_key,
+    _dlq_message_key,
+    _stream_key,
     _trim_stream_to_lowest_delivered_id,
 )
-from redis.asyncio import Redis
+from redis.asyncio import Redis, RedisCluster
+from redis.cluster import key_slot
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from prefect.server.events import Event
 from prefect.server.events.clients import PrefectServerEventsClient
@@ -116,6 +126,109 @@ async def drain_one(consumer: Consumer) -> Optional[Message]:
         await consumer.run(handler)
 
     return captured_messages[0] if captured_messages else None
+
+
+def test_messaging_keys_share_cluster_hash_slot(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv(
+        "PREFECT_REDIS_MESSAGING_URL", "redis+cluster://redis.example.com:6379"
+    )
+
+    topic = "message-tests"
+    dlq_message_key = _dlq_message_key(topic)
+    keys = [
+        _stream_key(topic),
+        _deduplication_key(topic, "dedupe-id"),
+        _dlq_key(topic),
+        dlq_message_key,
+    ]
+
+    assert keys[:3] == [
+        "{message:message-tests}:stream",
+        "{message:message-tests}:dedupe:dedupe-id",
+        "{message:message-tests}:dlq",
+    ]
+    assert dlq_message_key.startswith("{message:message-tests}:dlq:")
+    assert len({key_slot(key.encode()) for key in keys}) == 1
+
+
+def test_messaging_keys_preserve_standalone_names(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("PREFECT_REDIS_MESSAGING_URL", raising=False)
+
+    topic = "message-tests"
+    assert _stream_key(topic) == topic
+    assert _deduplication_key(topic, "dedupe-id") == "message:message-tests:dedupe-id"
+    assert _dlq_key(topic) == "dlq"
+    assert _dlq_message_key(topic).startswith("dlq:")
+
+
+@pytest.mark.skipif(
+    not os.environ.get("PREFECT_REDIS_CLUSTER_TEST_URL"),
+    reason="requires PREFECT_REDIS_CLUSTER_TEST_URL",
+)
+async def test_messaging_runs_against_real_redis_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cluster_url = os.environ["PREFECT_REDIS_CLUSTER_TEST_URL"]
+    client_url = cluster_url.replace("redis+cluster://", "redis://", 1).replace(
+        "rediss+cluster://", "rediss://", 1
+    )
+    settings_url = cluster_url
+    if settings_url.startswith("redis://"):
+        settings_url = settings_url.replace("redis://", "redis+cluster://", 1)
+    elif settings_url.startswith("rediss://"):
+        settings_url = settings_url.replace("rediss://", "rediss+cluster://", 1)
+
+    redis_client = RedisCluster.from_url(client_url, decode_responses=True)
+    await redis_client.flushall()
+    try:
+        monkeypatch.setenv("PREFECT_REDIS_MESSAGING_URL", settings_url)
+        monkeypatch.setattr(
+            "prefect_redis.messaging.get_async_redis_client",
+            lambda: redis_client,
+        )
+
+        topic = f"cluster-message-tests-{uuid.uuid4()}"
+        cache = Cache(topic=topic)
+        publisher = Publisher(
+            topic,
+            cache=cache,
+            deduplicate_by="message-id",
+            batch_size=1,
+            publish_every=None,
+        )
+        consumer = Consumer(topic, group=f"group-{uuid.uuid4()}")
+        captured_messages: list[Message] = []
+
+        async def handler(message: Message):
+            captured_messages.append(message)
+            raise StopConsumer(ack=True)
+
+        async with publisher as p:
+            await p.publish_data(b"hello", {"message-id": "A"})
+            await p.publish_data(b"duplicate", {"message-id": "A"})
+
+        await consumer.run(handler)
+
+        assert [message.data for message in captured_messages] == ["hello"]
+        assert await redis_client.xlen(_stream_key(topic)) == 1
+        assert await redis_client.scard(_dlq_key(topic)) == 0
+
+        failed_message = RedisStreamsMessage(
+            data="failed",
+            attributes={"message-id": "B"},
+            acker=lambda: asyncio.sleep(0),
+        )
+        await consumer._send_to_dlq(failed_message, retry_count=4)
+
+        dlq_message_ids = await redis_client.smembers(_dlq_key(topic))
+        assert len(dlq_message_ids) == 1
+        dlq_message_key = next(iter(dlq_message_ids))
+        assert dlq_message_key.startswith(f"{{message:{topic}}}:dlq:")
+        dlq_data = await redis_client.hget(dlq_message_key, "data")
+        assert json.loads(dlq_data)["data"] == "failed"
+    finally:
+        await redis_client.flushall()
+        await redis_client.aclose()
 
 
 async def test_publishing_and_consuming_a_single_message(
@@ -328,16 +441,116 @@ async def test_ephemeral_subscription(broker: str, publisher: Publisher):
 
 
 async def test_verify_ephemeral_cleanup(redis: Redis, broker: str):
-    """Verify that ephemeral subscriptions clean up after themselves."""
+    """Verify that ephemeral subscriptions do not create consumer groups."""
     async with ephemeral_subscription("message-tests") as consumer_kwargs:
-        group_name = consumer_kwargs["group"]
-        # Verify group exists
-        groups = await redis.xinfo_groups("message-tests")
-        assert any(g["name"] == group_name for g in groups)
+        assert consumer_kwargs["use_consumer_group"] is False
+        assert "group" not in consumer_kwargs
 
-    # Verify group is cleaned up
+        async with create_publisher("message-tests") as p:
+            await p.publish_data(b"hello, world", {"howdy": "partner"})
+
+        groups = await redis.xinfo_groups("message-tests")
+        assert groups == []
+
     groups = await redis.xinfo_groups("message-tests")
-    assert not any(g["name"] == group_name for g in groups)
+    assert groups == []
+
+
+async def test_ephemeral_subscription_does_not_replay_old_messages(
+    broker: str, publisher: Publisher
+):
+    """Ephemeral subscriptions should receive live messages, not stream history."""
+    captured_messages: list[Message] = []
+
+    async with publisher as p:
+        await p.publish_data(b"old", {"message": "old"})
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        raise StopConsumer(ack=True)
+
+    async with ephemeral_subscription("message-tests") as consumer_kwargs:
+        consumer = create_consumer(**consumer_kwargs)
+        consumer_task = asyncio.create_task(consumer.run(handler))
+
+        try:
+            async with publisher as p:
+                await p.publish_data(b"new", {"message": "new"})
+        finally:
+            await consumer_task
+
+    assert len(captured_messages) == 1
+    assert captured_messages[0].data == "new"
+    assert captured_messages[0].attributes == {"message": "new"}
+
+
+async def test_ephemeral_subscription_does_not_skip_messages_received_during_handler(
+    broker: str,
+):
+    """Ephemeral XREAD consumers should advance from the last seen ID after startup."""
+    captured_messages: list[Message] = []
+    second_message_published = asyncio.Event()
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+
+        if len(captured_messages) == 1:
+            async with create_publisher("message-tests") as p:
+                await p.publish_data(b"second", {"message": "second"})
+            second_message_published.set()
+            await asyncio.sleep(0.1)
+            return
+
+        raise StopConsumer(ack=True)
+
+    async with ephemeral_subscription("message-tests") as consumer_kwargs:
+        consumer = create_consumer(**consumer_kwargs)
+        consumer_task = asyncio.create_task(consumer.run(handler))
+
+        try:
+            async with create_publisher("message-tests") as p:
+                await p.publish_data(b"first", {"message": "first"})
+            await second_message_published.wait()
+        finally:
+            await consumer_task
+
+    assert [message.data for message in captured_messages] == ["first", "second"]
+
+
+async def test_ephemeral_subscription_trims_stream_without_consumer_groups(
+    redis: Redis, broker: str, publisher: Publisher
+):
+    """Ephemeral XREAD consumers should still periodically trim their stream."""
+    captured_messages: list[Message] = []
+
+    async with publisher as p:
+        for i in range(5):
+            await p.publish_data(b"old", {"message": f"old-{i}"})
+
+    assert await redis.xlen("message-tests") == 5
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        if len(captured_messages) == 2:
+            raise StopConsumer(ack=True)
+
+    async with ephemeral_subscription("message-tests") as consumer_kwargs:
+        consumer = create_consumer(**consumer_kwargs, trim_every=timedelta(seconds=0))
+        consumer_task = asyncio.create_task(consumer.run(handler))
+
+        try:
+            async with publisher as p:
+                await p.publish_data(b"new", {"message": "new-1"})
+                await p.publish_data(b"new", {"message": "new-2"})
+        finally:
+            await consumer_task
+
+    assert [message.attributes["message"] for message in captured_messages] == [
+        "new-1",
+        "new-2",
+    ]
+    assert await redis.xinfo_groups("message-tests") == []
+    assert await redis.xlen("message-tests") < 7
 
 
 @pytest.mark.parametrize("batch_size", [1, 5])
@@ -514,6 +727,43 @@ async def test_trimming_with_no_delivered_messages(redis: Redis):
     assert length == 2
 
 
+async def test_trimming_nonexistent_stream(redis: Redis):
+    """Test that trimming a stream that has never been published to is a no-op."""
+    await _trim_stream_to_lowest_delivered_id("test-trim-stream-that-does-not-exist")
+
+
+async def test_ephemeral_subscription_on_empty_topic_does_not_error(broker: str):
+    """Ephemeral consumers on a topic that has never been published to should not
+    treat the missing stream as a connection error and reconnect in a loop."""
+    captured_messages: list[Message] = []
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        raise StopConsumer(ack=True)
+
+    with patch("prefect_redis.messaging.logger.warning") as mock_warning:
+        async with ephemeral_subscription("never-published-topic") as consumer_kwargs:
+            consumer = create_consumer(
+                **consumer_kwargs,
+                block=timedelta(milliseconds=50),
+                trim_every=timedelta(seconds=0),
+            )
+            consumer_task = asyncio.create_task(consumer.run(handler))
+
+            try:
+                # give the consumer a chance to attempt a few empty reads and trims
+                await asyncio.sleep(0.5)
+                async with create_publisher(
+                    "never-published-topic", cache=create_cache()
+                ) as p:
+                    await p.publish_data(b"hello", {"message": "hello"})
+            finally:
+                await consumer_task
+
+    assert [message.data for message in captured_messages] == ["hello"]
+    mock_warning.assert_not_called()
+
+
 async def test_trimming_skips_idle_consumer_groups(
     redis: Redis, monkeypatch: pytest.MonkeyPatch
 ):
@@ -591,7 +841,7 @@ async def test_trimming_skips_idle_consumer_groups(
 
 
 async def test_cleanup_empty_consumer_groups(redis: Redis):
-    """Test that empty consumer groups are cleaned up."""
+    """Test that empty consumer groups that have consumed messages are cleaned up."""
 
     stream_name = "test-cleanup-stream"
 
@@ -600,10 +850,9 @@ async def test_cleanup_empty_consumer_groups(redis: Redis):
 
     # Create multiple consumer groups
     await redis.xgroup_create(stream_name, "ephemeral-active-group", id="0")
-    await redis.xgroup_create(stream_name, "ephemeral-empty-group-1", id="0")
-    await redis.xgroup_create(stream_name, "ephemeral-empty-group-2", id="0")
+    await redis.xgroup_create(stream_name, "ephemeral-abandoned-group", id="0")
 
-    # Add a consumer to the active group
+    # Add a consumer to the active group and consume a message
     await redis.xreadgroup(
         groupname="ephemeral-active-group",
         consumername="consumer-1",
@@ -611,20 +860,275 @@ async def test_cleanup_empty_consumer_groups(redis: Redis):
         count=1,
     )
 
-    # Verify all groups exist
+    # Add a consumer to the abandoned group, consume a message, then remove the consumer
+    # This simulates a group that was used but is now abandoned
+    await redis.xreadgroup(
+        groupname="ephemeral-abandoned-group",
+        consumername="temp-consumer",
+        streams={stream_name: ">"},
+        count=1,
+    )
+    # Remove the consumer from the abandoned group (simulating it leaving)
+    await redis.xgroup_delconsumer(
+        stream_name, "ephemeral-abandoned-group", "temp-consumer"
+    )
+
+    # Verify both groups exist
     groups_before = await redis.xinfo_groups(stream_name)
-    assert len(groups_before) == 3
+    assert len(groups_before) == 2
     group_names_before = {g["name"] for g in groups_before}
     assert group_names_before == {
         "ephemeral-active-group",
-        "ephemeral-empty-group-1",
-        "ephemeral-empty-group-2",
+        "ephemeral-abandoned-group",
     }
 
     # Run cleanup
     await _cleanup_empty_consumer_groups(stream_name)
 
-    # Verify only the active group remains
+    # Verify only the active group remains (abandoned group was deleted)
     groups_after = await redis.xinfo_groups(stream_name)
     assert len(groups_after) == 1
     assert groups_after[0]["name"] == "ephemeral-active-group"
+
+
+async def test_cleanup_preserves_newly_created_empty_groups(redis: Redis):
+    """Test that newly created empty consumer groups are NOT deleted.
+
+    This is a regression test for the issue where empty ephemeral groups were
+    deleted before users had a chance to add consumers to them. Groups with
+    last-delivered-id of "0-0" (haven't consumed any messages yet) should be
+    preserved to allow time for consumers to be added.
+    """
+
+    stream_name = "test-preserve-new-groups-stream"
+
+    # Create a stream with a message
+    await redis.xadd(stream_name, {"data": "test"})
+
+    # Create empty ephemeral groups (simulating deployment scenario where groups
+    # are created but consumers haven't been added yet)
+    await redis.xgroup_create(stream_name, "ephemeral-new-group-1", id="0")
+    await redis.xgroup_create(stream_name, "ephemeral-new-group-2", id="0")
+
+    # Also create a non-ephemeral group to verify it's not affected
+    await redis.xgroup_create(stream_name, "permanent-group", id="0")
+
+    # Verify all groups exist and have last-delivered-id of "0-0"
+    groups_before = await redis.xinfo_groups(stream_name)
+    assert len(groups_before) == 3
+    for group in groups_before:
+        assert group["last-delivered-id"] == "0-0"
+
+    # Run cleanup
+    await _cleanup_empty_consumer_groups(stream_name)
+
+    # Verify ALL groups still exist - none should be deleted because they
+    # haven't consumed any messages yet (last-delivered-id == "0-0")
+    groups_after = await redis.xinfo_groups(stream_name)
+    assert len(groups_after) == 3
+    group_names_after = {g["name"] for g in groups_after}
+    assert group_names_after == {
+        "ephemeral-new-group-1",
+        "ephemeral-new-group-2",
+        "permanent-group",
+    }
+
+
+async def test_consumer_recovers_from_redis_connection_error(
+    broker: str, publisher: Publisher
+):
+    """Test that consumer reconnects after Redis connection error (issue #19080)."""
+    captured_messages: list[Message] = []
+    connection_error_count = 0
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        if len(captured_messages) >= 2:
+            raise StopConsumer(ack=True)
+
+    consumer = create_consumer("message-tests")
+
+    # We'll simulate a connection error by patching xreadgroup to fail once
+    original_xreadgroup = Redis.xreadgroup
+
+    async def failing_xreadgroup(self, *args, **kwargs):
+        nonlocal connection_error_count
+        if connection_error_count == 0:
+            connection_error_count += 1
+            raise RedisConnectionError("Simulated connection error")
+        return await original_xreadgroup(self, *args, **kwargs)
+
+    with patch.object(Redis, "xreadgroup", failing_xreadgroup):
+        consumer_task = asyncio.create_task(consumer.run(handler))
+
+        # Give the consumer time to hit the error and reconnect
+        await asyncio.sleep(0.5)
+
+        # Publish messages - these should be received after reconnection
+        async with publisher as p:
+            await p.publish_data(b"message-1", {"id": "1"})
+            await p.publish_data(b"message-2", {"id": "2"})
+
+        # Wait for consumer to process messages
+        with anyio.move_on_after(5.0):
+            await consumer_task
+
+    # Verify the connection error was raised and recovered from
+    assert connection_error_count == 1, "Should have encountered one connection error"
+
+    # Verify messages were received after recovery
+    assert len(captured_messages) == 2, (
+        "Should have received both messages after recovery"
+    )
+    assert captured_messages[0].data == "message-1"
+    assert captured_messages[1].data == "message-2"
+
+
+async def test_clear_cached_clients():
+    """Test that clear_cached_clients clears the cache."""
+    # Get a client to populate the cache
+    from prefect_redis.client import get_async_redis_client
+
+    get_async_redis_client()  # Populate cache
+    assert len(_client_cache) > 0, "Cache should have at least one client"
+
+    # Clear the cache
+    await clear_cached_clients()
+
+    assert len(_client_cache) == 0, "Cache should be empty after clearing"
+
+
+async def test_consumer_handles_orphan_pending_entries(
+    redis: Redis, broker: str, publisher: Publisher
+):
+    """Test that orphan pending entries (None messages from XAUTOCLAIM) are
+    handled gracefully: acknowledged and skipped without crashing the consumer."""
+    captured_messages: list[Message] = []
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        raise StopConsumer(ack=True)
+
+    consumer = create_consumer("message-tests", min_idle_time=timedelta(seconds=0))
+
+    async with publisher as p:
+        await p.publish_data(b"real-message", {"id": "1"})
+
+    original_xautoclaim = Redis.xautoclaim
+
+    call_count = 0
+
+    async def xautoclaim_with_orphan(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return [
+                b"0-0",
+                [(b"9999999999999-0", None)],
+                [],
+            ]
+        return await original_xautoclaim(self, *args, **kwargs)
+
+    with patch.object(Redis, "xautoclaim", xautoclaim_with_orphan):
+        consumer_task = asyncio.create_task(consumer.run(handler))
+
+        with anyio.move_on_after(5.0):
+            await consumer_task
+
+    assert call_count >= 1, "xautoclaim should have been called"
+    assert len(captured_messages) == 1, (
+        "Should have received the real message after skipping orphan"
+    )
+    assert captured_messages[0].data == "real-message"
+
+
+async def test_batch_ack_excludes_failed_messages(
+    redis: Redis, broker: str, publisher: Publisher
+):
+    """Test that when multiple messages are read in a single batch, only
+    successfully handled messages are acknowledged. Failed messages should
+    remain pending for retry via xautoclaim."""
+    captured_messages: list[Message] = []
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        if message.data == "fail-me":
+            raise ValueError("Simulated failure")
+        if len(captured_messages) >= 3:
+            raise StopConsumer(ack=True)
+
+    consumer = create_consumer("message-tests", read_batch_size=10)
+
+    async with publisher as p:
+        await p.publish_data(b"good-1", {"id": "1"})
+        await p.publish_data(b"fail-me", {"id": "2"})
+        await p.publish_data(b"good-2", {"id": "3"})
+
+    consumer_task = asyncio.create_task(consumer.run(handler))
+    with anyio.move_on_after(5.0):
+        await consumer_task
+
+    assert any(m.data == "good-1" for m in captured_messages)
+    assert any(m.data == "good-2" for m in captured_messages)
+    assert any(m.data == "fail-me" for m in captured_messages)
+
+    # The failed message should still be pending (reclaimable)
+    test_consumer = create_consumer(
+        "message-tests", min_idle_time=timedelta(seconds=0.1)
+    )
+    await asyncio.sleep(0.2)
+    remaining = await drain_one(test_consumer)
+    assert remaining is not None, "Failed message should be reclaimable"
+    assert remaining.data == "fail-me"
+
+
+async def test_orphan_entries_acked_when_auto_ack_disabled(
+    redis: Redis, broker: str, publisher: Publisher
+):
+    """Orphan pending entries (stream entry deleted but PEL entry remains) must
+    be acknowledged even when automatically_acknowledge=False. Otherwise they
+    get reclaimed indefinitely."""
+    captured_messages: list[Message] = []
+
+    async def handler(message: Message):
+        captured_messages.append(message)
+        raise StopConsumer(ack=True)
+
+    consumer = create_consumer(
+        "message-tests",
+        min_idle_time=timedelta(seconds=0),
+        automatically_acknowledge=False,
+    )
+
+    async with publisher as p:
+        await p.publish_data(b"real-message", {"id": "1"})
+
+    original_xautoclaim = Redis.xautoclaim
+    call_count = 0
+    orphan_id = b"9999999999999-0"
+
+    async def xautoclaim_with_orphan(self, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return [b"0-0", [(orphan_id, None)], []]
+        return await original_xautoclaim(self, *args, **kwargs)
+
+    acked_ids: list[bytes] = []
+    original_xack = Redis.xack
+
+    async def tracking_xack(self, stream, group, *ids):
+        acked_ids.extend(ids)
+        return await original_xack(self, stream, group, *ids)
+
+    with (
+        patch.object(Redis, "xautoclaim", xautoclaim_with_orphan),
+        patch.object(Redis, "xack", tracking_xack),
+    ):
+        consumer_task = asyncio.create_task(consumer.run(handler))
+        with anyio.move_on_after(5.0):
+            await consumer_task
+
+    assert orphan_id in acked_ids, (
+        "Orphan entry should be acked even with automatically_acknowledge=False"
+    )

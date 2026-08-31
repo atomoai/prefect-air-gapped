@@ -4,19 +4,23 @@ import asyncio
 import shlex
 import time
 from json import JSONDecodeError
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, cast
 
 from httpx import HTTPStatusError
 from pydantic import Field
 from typing_extensions import Literal
 
 from prefect import flow, task
+from prefect.assets import Asset
 from prefect.blocks.abstract import JobBlock, JobRun
-from prefect.context import FlowRunContext
+from prefect.context import AssetContext, FlowRunContext
+from prefect.events import emit_event
 from prefect.logging import get_run_logger
 from prefect.utilities.asyncutils import sync_compatible
 from prefect_dbt.cloud.credentials import DbtCloudCredentials
 from prefect_dbt.cloud.exceptions import (
+    DbtCloudCreateJobFailed,
+    DbtCloudDeleteJobFailed,
     DbtCloudGetJobFailed,
     DbtCloudGetRunArtifactFailed,
     DbtCloudGetRunFailed,
@@ -36,8 +40,155 @@ from prefect_dbt.cloud.runs import (
     wait_for_dbt_cloud_job_run,
 )
 from prefect_dbt.cloud.utils import extract_user_message
+from prefect_dbt.core._artifacts import (
+    ASSET_NODE_TYPES,
+    create_asset_for_node,
+    get_upstream_assets_for_node,
+)
+from prefect_dbt.core._manifest import (
+    DbtNode,
+    create_dbt_node_from_manifest_data,
+    create_dbt_source_node_from_manifest_data,
+)
 
 EXE_COMMANDS = ("build", "run", "test", "seed", "snapshot")
+ASSET_MATERIALIZATION_COMMANDS = frozenset({"build", "run", "seed", "snapshot"})
+SUCCESSFUL_DBT_NODE_STATUSES = frozenset({"success"})
+
+
+def _build_nodes_from_manifest(manifest: dict[str, Any]) -> dict[str, DbtNode]:
+    nodes: dict[str, DbtNode] = {}
+
+    for unique_id, node_data in manifest.get("nodes", {}).items():
+        nodes[unique_id] = create_dbt_node_from_manifest_data(unique_id, node_data)
+
+    for unique_id, source_data in manifest.get("sources", {}).items():
+        nodes[unique_id] = create_dbt_source_node_from_manifest_data(
+            unique_id, source_data
+        )
+
+    return nodes
+
+
+def _select_successful_asset_nodes(
+    all_nodes: dict[str, DbtNode],
+    run_results: dict[str, Any],
+) -> dict[str, DbtNode]:
+    selected_nodes: dict[str, DbtNode] = {}
+
+    for result in run_results.get("results", []):
+        if result.get("status") not in SUCCESSFUL_DBT_NODE_STATUSES:
+            continue
+
+        unique_id = result.get("unique_id")
+        if not unique_id:
+            continue
+
+        node = all_nodes.get(unique_id)
+        if (
+            node
+            and node.resource_type in ASSET_NODE_TYPES
+            and node.materialization != "ephemeral"
+            and node.relation_name
+        ):
+            selected_nodes[unique_id] = node
+
+    return selected_nodes
+
+
+def _emit_asset_materialization(asset: Asset, upstream_assets: list[Asset]) -> None:
+    related = [AssetContext.asset_as_related(a) for a in upstream_assets]
+    related.append(AssetContext.related_materialized_by("dbt"))
+
+    emit_event(
+        event="prefect.asset.materialization.succeeded",
+        resource=AssetContext.asset_as_resource(asset),
+        related=related,
+    )
+
+
+def _format_create_assets_error(run_id: int, error: Exception) -> str:
+    return f"Failed to create assets for dbt Cloud job run {run_id}: {error}"
+
+
+def _get_dbt_cloud_run_step_command(run_step: dict[str, Any]) -> str:
+    return run_step.get("name", "").partition("`")[2].partition("`")[0]
+
+
+def _is_asset_materialization_run_step(run_step: dict[str, Any]) -> bool:
+    status = run_step.get("status_humanized", "").lower()
+    if status in {"cancelled", "skipped"}:
+        return False
+
+    command_components = shlex.split(_get_dbt_cloud_run_step_command(run_step))
+    return any(
+        command in command_components for command in ASSET_MATERIALIZATION_COMMANDS
+    )
+
+
+async def _materialize_dbt_cloud_assets(dbt_cloud_job_run: "DbtCloudJobRun") -> None:
+    logger = get_run_logger()
+    dbt_cloud_credentials = dbt_cloud_job_run.dbt_cloud_credentials
+
+    try:
+        run_info = await get_dbt_cloud_run_info(
+            dbt_cloud_credentials=dbt_cloud_credentials,
+            run_id=dbt_cloud_job_run.run_id,
+            include_related=["run_steps"],
+        )
+        materialized_assets_count = 0
+        for run_step in run_info.get("run_steps", []):
+            if not _is_asset_materialization_run_step(run_step):
+                continue
+
+            step = run_step.get("index")
+            manifest = cast(
+                dict[str, Any],
+                await get_dbt_cloud_run_artifact(
+                    dbt_cloud_credentials=dbt_cloud_credentials,
+                    run_id=dbt_cloud_job_run.run_id,
+                    path="manifest.json",
+                    step=step,
+                ),
+            )
+            run_results = cast(
+                dict[str, Any],
+                await get_dbt_cloud_run_artifact(
+                    dbt_cloud_credentials=dbt_cloud_credentials,
+                    run_id=dbt_cloud_job_run.run_id,
+                    path="run_results.json",
+                    step=step,
+                ),
+            )
+
+            adapter_type = manifest.get("metadata", {}).get("adapter_type")
+            if not adapter_type:
+                logger.warning(
+                    "Adapter type not found in manifest for dbt Cloud job run %s "
+                    "step %s. Skipping asset creation.",
+                    dbt_cloud_job_run.run_id,
+                    step,
+                )
+                continue
+
+            all_nodes = _build_nodes_from_manifest(manifest)
+            selected_nodes = _select_successful_asset_nodes(all_nodes, run_results)
+
+            for node in selected_nodes.values():
+                asset = create_asset_for_node(node, adapter_type)
+                upstream_assets = get_upstream_assets_for_node(
+                    node, all_nodes, adapter_type
+                )
+                _emit_asset_materialization(asset, upstream_assets)
+                materialized_assets_count += 1
+
+        logger.info(
+            "Created %s asset materializations for dbt Cloud job run %s.",
+            materialized_assets_count,
+            dbt_cloud_job_run.run_id,
+        )
+    except Exception as ex:
+        logger.warning(_format_create_assets_error(dbt_cloud_job_run.run_id, ex))
 
 
 @task(
@@ -91,6 +242,129 @@ async def get_dbt_cloud_job_info(
     except HTTPStatusError as ex:
         raise DbtCloudGetJobFailed(extract_user_message(ex)) from ex
     return response.json()["data"]
+
+
+@task(
+    name="Create dbt Cloud job",
+    description="Creates a new dbt Cloud job.",
+    retries=3,
+    retry_delay_seconds=10,
+)
+async def create_dbt_cloud_job(
+    dbt_cloud_credentials: DbtCloudCredentials,
+    project_id: int,
+    environment_id: int,
+    name: str,
+    execute_steps: Optional[List[str]] = None,
+    **kwargs: Any,
+) -> Dict:
+    """
+    A task to create a new dbt Cloud job.
+
+    Args:
+        dbt_cloud_credentials: Credentials for authenticating with dbt Cloud.
+        project_id: The ID of the project to create the job in.
+        environment_id: The ID of the environment for the job.
+        name: The name of the job.
+        execute_steps: List of dbt commands to execute (e.g. ["dbt run", "dbt test"]).
+            Defaults to ["dbt build"].
+        **kwargs: Additional job configuration options.
+
+    Returns:
+        The job data returned by the dbt Cloud administrative API.
+
+    Example:
+        Create a dbt Cloud job:
+        ```python
+        from prefect import flow
+
+        from prefect_dbt.cloud import DbtCloudCredentials
+        from prefect_dbt.cloud.jobs import create_dbt_cloud_job
+
+        @flow
+        def create_job_flow():
+            credentials = DbtCloudCredentials(api_key="my_api_key", account_id=123456789)
+
+            return create_dbt_cloud_job(
+                dbt_cloud_credentials=credentials,
+                project_id=12345,
+                environment_id=67890,
+                name="My New Job",
+                execute_steps=["dbt run -s my_model", "dbt test -s my_model"],
+            )
+
+        create_job_flow()
+        ```
+    """
+    logger = get_run_logger()
+
+    logger.info(f"Creating dbt Cloud job '{name}' in project {project_id}")
+
+    try:
+        async with dbt_cloud_credentials.get_administrative_client() as client:
+            response = await client.create_job(
+                project_id=project_id,
+                environment_id=environment_id,
+                name=name,
+                execute_steps=execute_steps,
+                **kwargs,
+            )
+    except HTTPStatusError as ex:
+        raise DbtCloudCreateJobFailed(extract_user_message(ex)) from ex
+
+    job_data = response.json()["data"]
+    logger.info(f"Created dbt Cloud job with ID {job_data.get('id')}")
+    return job_data
+
+
+@task(
+    name="Delete dbt Cloud job",
+    description="Deletes a dbt Cloud job.",
+    retries=3,
+    retry_delay_seconds=10,
+)
+async def delete_dbt_cloud_job(
+    dbt_cloud_credentials: DbtCloudCredentials,
+    job_id: int,
+) -> None:
+    """
+    A task to delete a dbt Cloud job.
+
+    Args:
+        dbt_cloud_credentials: Credentials for authenticating with dbt Cloud.
+        job_id: The ID of the job to delete.
+
+    Example:
+        Delete a dbt Cloud job:
+        ```python
+        from prefect import flow
+
+        from prefect_dbt.cloud import DbtCloudCredentials
+        from prefect_dbt.cloud.jobs import delete_dbt_cloud_job
+
+        @flow
+        def delete_job_flow():
+            credentials = DbtCloudCredentials(api_key="my_api_key", account_id=123456789)
+
+            delete_dbt_cloud_job(
+                dbt_cloud_credentials=credentials,
+                job_id=42,
+            )
+
+        delete_job_flow()
+        ```
+    """
+    logger = get_run_logger()
+
+    logger.info(f"Deleting dbt Cloud job with ID {job_id}")
+
+    try:
+        async with dbt_cloud_credentials.get_administrative_client() as client:
+            await client.delete_job(job_id=job_id)
+    except HTTPStatusError as ex:
+        raise DbtCloudDeleteJobFailed(extract_user_message(ex)) from ex
+
+    logger.info(f"Deleted dbt Cloud job with ID {job_id}")
 
 
 @task(
@@ -347,6 +621,14 @@ async def trigger_dbt_cloud_job_run_and_wait_for_completion(
         ```
     """  # noqa
     logger = get_run_logger()
+
+    if (
+        trigger_job_run_options is not None
+        and trigger_job_run_options.timeout_seconds_override is not None
+    ):
+        max_wait_seconds = max(
+            max_wait_seconds, trigger_job_run_options.timeout_seconds_override
+        )
 
     triggered_run_data_future = await trigger_dbt_cloud_job_run(
         dbt_cloud_credentials=dbt_cloud_credentials,
@@ -648,6 +930,10 @@ class DbtCloudJobRun(JobRun):  # NOT A BLOCK
     @property
     def _log_prefix(self):
         return f"dbt Cloud job {self._dbt_cloud_job.job_id} run {self.run_id}."
+
+    @property
+    def dbt_cloud_credentials(self) -> DbtCloudCredentials:
+        return self._dbt_cloud_credentials
 
     async def _wait_until_state(
         self,
@@ -1091,6 +1377,7 @@ class DbtCloudJob(JobBlock):
 async def run_dbt_cloud_job(
     dbt_cloud_job: DbtCloudJob,
     targeted_retries: int = 3,
+    create_assets: bool = False,
 ) -> Dict[str, Any]:
     """
     Flow that triggers and waits for a dbt Cloud job run, retrying a
@@ -1100,6 +1387,8 @@ async def run_dbt_cloud_job(
         dbt_cloud_job: Block that holds the information and
             methods to interact with a dbt Cloud job.
         targeted_retries: The number of times to retry failed steps.
+        create_assets: Whether to create Prefect asset materializations
+            for successfully executed dbt models, seeds, and snapshots.
 
     Examples:
         ```python
@@ -1119,6 +1408,7 @@ async def run_dbt_cloud_job(
         ```
     """
     logger = get_run_logger()
+    asset_materialization_runs: List[DbtCloudJobRun] = []
 
     run = await task(dbt_cloud_job.trigger.aio)(dbt_cloud_job)
 
@@ -1126,12 +1416,17 @@ async def run_dbt_cloud_job(
     try:
         await task(run.wait_for_completion.aio)(run)
         result = await task(run.fetch_result.aio)(run)
+        if create_assets:
+            await _materialize_dbt_cloud_assets(run)
         return result
     except DbtCloudJobRunFailed:
         if targeted_retries <= 0:
             raise DbtCloudJobRunFailed(
                 f"dbt Cloud job {run.run_id} failed after {targeted_retries} retries."
             )
+
+        if create_assets:
+            asset_materialization_runs.append(run)
 
         # Continue with retries if targeted_retries > 0
         remaining_retries = targeted_retries
@@ -1144,8 +1439,14 @@ async def run_dbt_cloud_job(
             try:
                 await task(run.wait_for_completion.aio)(run)
                 result = await task(run.fetch_result.aio)(run)
+                if create_assets:
+                    asset_materialization_runs.append(run)
+                    for asset_run in asset_materialization_runs:
+                        await _materialize_dbt_cloud_assets(asset_run)
                 return result
             except DbtCloudJobRunFailed:
+                if create_assets:
+                    asset_materialization_runs.append(run)
                 if remaining_retries <= 0:
                     break
 

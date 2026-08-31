@@ -100,3 +100,86 @@ def test_format_git_credentials_no_token_raises():
         ValueError, match="Token or password is required for BitBucket authentication"
     ):
         credentials.format_git_credentials("https://bitbucket.org/org/repo.git")
+
+
+def test_format_git_credentials_escapes_forward_slash():
+    """Regression test for issue #19419: tokens with forward slashes must be URL-encoded.
+
+    Bitbucket access tokens can contain forward slashes (base64 encoding uses them).
+    These must be encoded as %2F to avoid being interpreted as path separators.
+    """
+    credentials = BitBucketCredentials(token="abc123/def456/ghi789")
+    result = credentials.format_git_credentials("https://bitbucket.org/org/repo.git")
+    # forward slashes should be encoded as %2F
+    assert (
+        result
+        == "https://x-token-auth:abc123%2Fdef456%2Fghi789@bitbucket.org/org/repo.git"
+    )
+    # ensure raw slashes don't appear in the credentials portion
+    credentials_part = result.split("@")[0].split("//")[1]
+    assert "/" not in credentials_part, (
+        "credentials should not contain unencoded slashes"
+    )
+
+
+def test_format_git_credentials_escapes_base64_characters():
+    """Ensure base64 characters (+, /, =) in tokens are properly escaped.
+
+    Base64-encoded tokens use A-Z, a-z, 0-9, +, /, and = characters.
+    All special characters must be URL-encoded for use in credentials.
+    """
+    credentials = BitBucketCredentials(token="aBc+DeF/gHi=")
+    result = credentials.format_git_credentials("https://bitbucket.org/org/repo.git")
+    # + should be %2B, / should be %2F, = should be %3D
+    assert (
+        result == "https://x-token-auth:aBc%2BDeF%2FgHi%3D@bitbucket.org/org/repo.git"
+    )
+
+
+def test_format_git_credentials_server_escapes_special_characters():
+    """Ensure special characters in server credentials are URL-encoded."""
+    credentials = BitBucketCredentials(
+        token="token/with/slashes", username="user@domain.com"
+    )
+    result = credentials.format_git_credentials(
+        "https://bitbucketserver.com/scm/project/repo.git"
+    )
+    # both username and token should have special characters encoded
+    assert (
+        result
+        == "https://user%40domain.com:token%2Fwith%2Fslashes@bitbucketserver.com/scm/project/repo.git"
+    )
+
+
+def test_format_git_credentials_self_hosted_instance():
+    """Regression test for issue #19512: self-hosted instances without 'bitbucketserver' in hostname.
+
+    Self-hosted BitBucket Server instances may not have 'bitbucketserver' in their hostname
+    (e.g., git.example.com), but still require username:password authentication.
+    When username is provided, it should use username:password format regardless of hostname.
+    """
+    credentials = BitBucketCredentials(token="my-token", username="myuser")
+    result = credentials.format_git_credentials(
+        "https://git.example.com/scm/project/repo.git"
+    )
+    # Should use username:password format, not x-token-auth:
+    assert result == "https://myuser:my-token@git.example.com/scm/project/repo.git"
+
+
+def test_format_git_credentials_self_hosted_instance_with_special_chars():
+    """Test self-hosted instances with special characters in credentials.
+
+    Ensures that username:password auth works correctly for self-hosted instances
+    even when credentials contain special characters that need URL encoding.
+    """
+    credentials = BitBucketCredentials(
+        password="p@ss!word/123", username="user@domain.com"
+    )
+    result = credentials.format_git_credentials(
+        "https://git.example.com/scm/project/repo.git"
+    )
+    # Both username and password should be URL-encoded
+    assert (
+        result
+        == "https://user%40domain.com:p%40ss%21word%2F123@git.example.com/scm/project/repo.git"
+    )

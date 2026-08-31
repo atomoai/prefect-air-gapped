@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from prefect._internal.compatibility.async_dispatch import async_dispatch
 from prefect._internal.retries import retry_async_fn
+from prefect.deployments.steps.core import _PULL_STEP_SOURCE_CWD
 from prefect.logging.loggers import get_logger
 from prefect.runner.storage import BlockStorageAdapter, GitRepository, RemoteStorage
 from prefect.utilities.asyncutils import run_coro_as_sync
@@ -32,6 +33,10 @@ def set_working_directory(directory: str) -> dict[str, str]:
         dict: a dictionary containing a `directory` key of the
             absolute path of the directory that was set
     """
+    source_cwd = _PULL_STEP_SOURCE_CWD.get()
+    if source_cwd is not None and not Path(directory).expanduser().is_absolute():
+        directory = str((source_cwd / directory).resolve())
+
     os.chdir(directory)
     return dict(directory=os.getcwd())
 
@@ -55,6 +60,7 @@ async def agit_clone(
     access_token: Optional[str] = None,
     credentials: Optional["Block"] = None,
     directories: Optional[list[str]] = None,
+    clone_directory_name: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Asynchronously clones a git repository into the current working directory.
@@ -68,6 +74,8 @@ async def agit_clone(
             the repository will be cloned using the default git credentials
         credentials: a GitHubCredentials, GitLabCredentials, or BitBucketCredentials block can be used to specify the
             credentials to use for cloning the repository.
+        clone_directory_name: the name of the local directory to clone into; if not provided,
+            the name will be inferred from the repository URL and branch
 
     Returns:
         dict: a dictionary containing a `directory` key of the new directory that was created
@@ -89,6 +97,7 @@ async def agit_clone(
         commit_sha=commit_sha,
         include_submodules=include_submodules,
         directories=directories,
+        name=clone_directory_name,
     )
 
     await _pull_git_repository_with_retries(storage)
@@ -105,6 +114,7 @@ def git_clone(
     access_token: Optional[str] = None,
     credentials: Optional["Block"] = None,
     directories: Optional[list[str]] = None,
+    clone_directory_name: Optional[str] = None,
 ) -> dict[str, str]:
     """
     Clones a git repository into the current working directory.
@@ -119,6 +129,8 @@ def git_clone(
         credentials: a GitHubCredentials, GitLabCredentials, or BitBucketCredentials block can be used to specify the
             credentials to use for cloning the repository.
         directories: Specify directories you want to be included (uses git sparse-checkout)
+        clone_directory_name: the name of the local directory to clone into; if not provided,
+            the name will be inferred from the repository URL and branch
 
     Returns:
         dict: a dictionary containing a `directory` key of the new directory that was created
@@ -184,6 +196,15 @@ def git_clone(
                 repository: https://github.com/org/repo.git
                 directories: ["dir_1", "dir_2", "prefect"]
         ```
+
+        Clone a repository with a custom directory name:
+        ```yaml
+        pull:
+            - prefect.deployments.steps.git_clone:
+                repository: https://github.com/org/repo.git
+                branch: dev
+                clone_directory_name: my-custom-name
+        ```
     """
     if access_token and credentials:
         raise ValueError(
@@ -199,6 +220,7 @@ def git_clone(
         commit_sha=commit_sha,
         include_submodules=include_submodules,
         directories=directories,
+        name=clone_directory_name,
     )
 
     run_coro_as_sync(_pull_git_repository_with_retries(storage))
@@ -264,7 +286,11 @@ async def pull_with_block(
     try:
         block = await Block.aload(full_slug)
     except Exception:
-        deployment_logger.exception("Unable to load block '%s'", full_slug)
+        deployment_logger.exception(
+            "Failed to load storage block with slug %s."
+            " Verify the block exists and you have access to it.",
+            full_slug,
+        )
         raise
 
     try:

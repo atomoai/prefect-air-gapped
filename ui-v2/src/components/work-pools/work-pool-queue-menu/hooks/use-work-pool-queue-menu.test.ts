@@ -22,9 +22,6 @@ Object.assign(navigator, {
 	},
 });
 
-// Mock console.log since the hook has TODO console logs
-vi.spyOn(console, "log").mockImplementation(() => {});
-
 describe("useWorkPoolQueueMenu", () => {
 	const defaultQueue = createFakeWorkPoolQueue({
 		id: "test-id",
@@ -118,7 +115,11 @@ describe("useWorkPoolQueueMenu", () => {
 		expect(toast.success).toHaveBeenCalledWith("ID copied to clipboard");
 	});
 
-	it("handles edit action", () => {
+	it("navigates to edit page when edit action is triggered", async () => {
+		const mockNavigate = vi.fn();
+		const { useNavigate } = await import("@tanstack/react-router");
+		vi.mocked(useNavigate).mockReturnValue(mockNavigate);
+
 		const { result } = renderHook(() => useWorkPoolQueueMenu(defaultQueue));
 
 		const editItem = result.current.menuItems.find(
@@ -129,7 +130,13 @@ describe("useWorkPoolQueueMenu", () => {
 			editItem?.action();
 		});
 
-		expect(console.log).toHaveBeenCalledWith("Edit queue:", "test-queue");
+		expect(mockNavigate).toHaveBeenCalledWith({
+			to: "/work-pools/work-pool/$workPoolName/queue/$workQueueName/edit",
+			params: {
+				workPoolName: "test-pool",
+				workQueueName: "test-queue",
+			},
+		});
 	});
 
 	it("navigates to automation creation on automate action", async () => {
@@ -151,6 +158,19 @@ describe("useWorkPoolQueueMenu", () => {
 
 		expect(mockNavigate).toHaveBeenCalledWith({
 			to: "/automations/create",
+			search: {
+				trigger: {
+					type: "event",
+					posture: "Reactive",
+					match: {
+						"prefect.resource.id": `prefect.work-queue.${defaultQueue.id}`,
+					},
+					for_each: ["prefect.resource.id"],
+					expect: ["prefect.work-queue.not-ready"],
+					threshold: 1,
+					within: 0,
+				},
+			},
 		});
 	});
 
@@ -206,12 +226,16 @@ describe("useWorkPoolQueueMenu", () => {
 		]);
 	});
 
-	it("handles different queue names correctly", () => {
+	it("handles different queue names correctly", async () => {
 		// Mock clipboard API
 		const mockClipboard = {
 			writeText: vi.fn().mockResolvedValue(undefined),
 		};
 		Object.assign(navigator, { clipboard: mockClipboard });
+
+		const mockNavigate = vi.fn();
+		const { useNavigate } = await import("@tanstack/react-router");
+		vi.mocked(useNavigate).mockReturnValue(mockNavigate);
 
 		const customQueue = createFakeWorkPoolQueue({
 			id: "custom-id",
@@ -241,6 +265,12 @@ describe("useWorkPoolQueueMenu", () => {
 			editItem?.action();
 		});
 
-		expect(console.log).toHaveBeenCalledWith("Edit queue:", "my-custom-queue");
+		expect(mockNavigate).toHaveBeenCalledWith({
+			to: "/work-pools/work-pool/$workPoolName/queue/$workQueueName/edit",
+			params: {
+				workPoolName: "my-pool",
+				workQueueName: "my-custom-queue",
+			},
+		});
 	});
 });

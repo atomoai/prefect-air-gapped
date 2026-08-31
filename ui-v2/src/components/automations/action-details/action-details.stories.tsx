@@ -17,8 +17,8 @@ import { ActionDetails } from "./action-details";
 const ACTIONS: Array<Automation["actions"][number]> = [
 	{ type: "do-nothing" },
 	{ type: "cancel-flow-run" },
+	{ type: "delete-flow-run" },
 	{ type: "suspend-flow-run" },
-	{ type: "cancel-flow-run" },
 	{ type: "resume-flow-run" },
 	{ type: "run-deployment", deployment_id: null, source: "inferred" },
 	{
@@ -47,40 +47,49 @@ const ACTIONS: Array<Automation["actions"][number]> = [
 	{
 		type: "change-flow-run-state",
 		state: "CANCELLED",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "CANCELLING",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "COMPLETED",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "CRASHED",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "FAILED",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "PAUSED",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "PENDING",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "RUNNING",
 		message: "My message",
 		name: "My name",
+		force: false,
 	},
 	{
 		type: "change-flow-run-state",
 		state: "SCHEDULED",
+		force: false,
 	},
 	{
 		type: "send-notification",
