@@ -98,6 +98,19 @@ echo -e "${BLUE}Current base: ${OLD_BASE_SHORT}${NC}"
 COMMIT_COUNT=$(git rev-list --count ${OLD_BASE}..air-gapped/patches)
 echo -e "${BLUE}Commits to rebase: ${COMMIT_COUNT}${NC}"
 
+# Make the merge=binary rule from .gitattributes actually apply to this rebase.
+# A tracked .gitattributes only takes effect once the commit introducing it has
+# been applied, and our lock-touching patches come earlier in the series -- so
+# during the rebase git would still try (and sometimes succeed at) a textual
+# merge of the lockfile, which is how it silently drifted before. info/attributes
+# is per-clone and independent of whichever tree is checked out mid-rebase.
+ATTRIBUTES_FILE="$(git rev-parse --git-path info/attributes)"
+if ! grep -qs '^uv\.lock[[:space:]]\+merge=binary' "${ATTRIBUTES_FILE}"; then
+    mkdir -p "$(dirname "${ATTRIBUTES_FILE}")"
+    echo 'uv.lock merge=binary' >> "${ATTRIBUTES_FILE}"
+    echo -e "${GREEN}✓ Installed 'uv.lock merge=binary' in ${ATTRIBUTES_FILE}${NC}"
+fi
+
 rebase_in_progress() {
     [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]
 }
